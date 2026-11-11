@@ -1,1 +1,1 @@
-import{pack}from'./archive.mjs';await pack('skill','dist/package');
+import{pack}from'./archive.mjs';import{execFileSync}from'node:child_process';await pack('skill','dist/package');execFileSync('npm',['pack','--ignore-scripts','--pack-destination','dist'],{stdio:'inherit'});

@@ -2,9 +2,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, writeFile, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { validatePacket } from '@zesia/client/workflow';
-import { readConfig, destinationOf } from '@zesia/client/config';
-import { consultOverA2A, preflightConsult } from '@zesia/client/a2a';
+import { validatePacket } from './runtime/workflow.mjs';
+import { readConfig, destinationOf } from './runtime/config.mjs';
+import { consultOverA2A, preflightConsult } from './runtime/a2a.mjs';
 
 export function portableEnvironment(env = process.env) {
   return { ...env, ZESIA_CONFIG: env.ZESIA_CONFIG || join(homedir(), '.config/zesia/agent.json') };

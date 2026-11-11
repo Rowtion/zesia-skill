@@ -1,21 +1,42 @@
 {
-  "name": "@zesia/portable-skill",
-  "version": "0.1.2",
+  "name": "@zesia/runtime",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "repository": {
     "type": "git",
     "url": "https://github.com/Rowtion/zesia-skill.git"
   },
-  "dependencies": {
-    "@zesia/client": "https://github.com/Rowtion/zesia-client/releases/download/v0.1.0/zesia-client-0.1.0.tgz"
-  },
   "devDependencies": {
     "esbuild": "0.25.12"
   },
   "scripts": {
-    "test": "node --test runtime.test.mjs",
+    "test": "node --test runtime.test.mjs test/*.test.mjs",
     "build": "node scripts/build.mjs",
-    "package": "node scripts/package.mjs"
-  }
+    "package": "node scripts/package.mjs",
+    "install:a2a": "node scripts/install-a2a.mjs"
+  },
+  "exports": {
+    "./a2a": "./runtime/a2a.mjs",
+    "./config": "./runtime/config.mjs",
+    "./evidence": "./runtime/evidence.mjs",
+    "./workflow": "./runtime/workflow.mjs",
+    "./tools": "./runtime/tools.mjs",
+    "./protocol": "./runtime/protocol.mjs",
+    "./contract": "./runtime/contract.mjs",
+    "./configure": "./scripts/configure-shared.mjs",
+    "./read-secret": "./scripts/read-secret-shared.mjs",
+    "./install-a2a": "./scripts/install-a2a.mjs"
+  },
+  "files": [
+    "runtime",
+    "runtime.mjs",
+    "cli.mjs",
+    "configure.mjs",
+    "scripts",
+    "SKILL.md",
+    "references",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
+  ]
 }
