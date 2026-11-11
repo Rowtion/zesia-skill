@@ -1,0 +1,37 @@
+name: Release
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type release to publish the version in package.json
+        required: true
+        type: string
+permissions:
+  contents: write
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - run: npm ci --ignore-scripts
+      - run: npm run build --if-present
+      - run: npm test
+      - run: npm run package
+      - name: Publish immutable version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("package.json","utf8")).version')
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo 'This version already exists. Bump package.json before publishing.' >&2
+            exit 1
+          fi
+          mapfile -t ASSETS < <(find dist -maxdepth 1 -type f -print | sort)
+          gh release create "v$VERSION" "${ASSETS[@]}" --target "$GITHUB_SHA" --title "v$VERSION" --notes 'Built and tested from this exact source commit. Checksums and source metadata are attached.'

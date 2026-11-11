@@ -1,0 +1,21 @@
+{
+  "name": "@zesia/portable-skill",
+  "version": "0.1.2",
+  "private": true,
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Rowtion/zesia-skill.git"
+  },
+  "dependencies": {
+    "@zesia/client": "https://github.com/Rowtion/zesia-client/releases/download/v0.1.0/zesia-client-0.1.0.tgz"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12"
+  },
+  "scripts": {
+    "test": "node --test runtime.test.mjs",
+    "build": "node scripts/build.mjs",
+    "package": "node scripts/package.mjs"
+  }
+}
