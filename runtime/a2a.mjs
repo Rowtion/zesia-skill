@@ -8,6 +8,7 @@ import {fileURLToPath} from 'node:url';
 import {randomUUID, createHash, timingSafeEqual} from 'node:crypto';
 import assert from 'node:assert/strict';
 import {destinationOf} from './config.mjs';
+import {deadlineFor} from './deadline.mjs';
 export {CONSULT_MEDIA_TYPE, A2A_PROTOCOL_VERSION} from './contract.mjs';
 import {CONSULT_MEDIA_TYPE} from './contract.mjs';
 const execute=promisify(execFile);
@@ -31,7 +32,7 @@ export async function consultOverA2A({url,token,input,contextId,clientRequestId,
  if(clientRequestId!==undefined&&(typeof clientRequestId!=='string'||!clientRequestId||clientRequestId.length>200))throw Error('Invalid client request ID.');
  const message={messageId:clientRequestId||randomUUID(),role:'ROLE_USER',...(contextId?{contextId}:{}),parts:[{data:input,mediaType:CONSULT_MEDIA_TYPE}]};
  const expected=hash(message);const temporary=await mkdtemp(join(tmpdir(),'zesia-a2a-'));const nonce=randomUUID();let attempts=0,upstream,upstreamStatus;
- const deadline=AbortSignal.any([...(signal?[signal]:[]),AbortSignal.timeout(60000)]);
+ let deadline;
  const server=createServer(async(request,response)=>{
   try{
    if(request.method!=='POST'||request.url!=='/a2a'||request.headers.authorization!==`Bearer ${nonce}`){response.writeHead(403);response.end('{}');return;}
@@ -39,12 +40,13 @@ export async function consultOverA2A({url,token,input,contextId,clientRequestId,
    const body=JSON.parse(Buffer.concat(chunks).toString());
    if(body.method!=='SendMessage'||!timingSafeEqual(hash(body.params?.message),expected)||attempts!==0){response.writeHead(409);response.end('{}');return;}
    attempts++;onStage('cloud_consultation');
-   const remote=await transport(origin+'/a2a',{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json','a2a-version':'1.0'},body:JSON.stringify(body),redirect:'error',signal:deadline});
+   const remote=await transport(origin+'/a2a',{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json','a2a-version':'1.0'},body:JSON.stringify(body),redirect:'error',signal:deadline.signal});
    upstreamStatus=remote.status;upstream=await bounded(remote);
    response.writeHead(remote.status,{'content-type':'application/json'});response.end(JSON.stringify(upstream));
   }catch{response.writeHead(502,{'content-type':'application/json'});response.end(JSON.stringify({jsonrpc:'2.0',id:null,error:{code:-32603,message:'The fixed consultation endpoint did not return a usable response.'}}));}
  });
  try{
+  deadline=deadlineFor(signal);
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});
   const endpoint='http://127.0.0.1:'+server.address().port+'/a2a';
   await writeFile(join(temporary,'request.json'),JSON.stringify({message}),{mode:0o600});
@@ -53,12 +55,12 @@ export async function consultOverA2A({url,token,input,contextId,clientRequestId,
   const allowed=new Set(['PATH','Path','HOME','USERPROFILE','SYSTEMROOT','SystemRoot','WINDIR','TEMP','TMP','TMPDIR','LANG','LC_ALL','SSL_CERT_FILE','SSL_CERT_DIR']);
   const env=Object.fromEntries(Object.entries(process.env).filter(([k])=>allowed.has(k)));
   let result;
-  try{result=await execute(cliBinary,['send','--endpoint',endpoint,'--transport','jsonrpc','--request-payload',join(temporary,'request.json'),'--config',join(temporary,'config.json'),'--a2a-version','1.0','--timeout','60s','--output','json'],{cwd:temporary,env,signal:deadline,maxBuffer:6*1024*1024,timeout:65000,windowsHide:true});}
+  try{result=await execute(cliBinary,['send','--endpoint',endpoint,'--transport','jsonrpc','--request-payload',join(temporary,'request.json'),'--config',join(temporary,'config.json'),'--a2a-version','1.0','--timeout','60s','--output','json'],{cwd:temporary,env,signal:deadline.signal,maxBuffer:6*1024*1024,timeout:65000,windowsHide:true});}
   catch(error){throw Object.assign(upstream?.error?remoteError(upstream,upstreamStatus):new Error(attempts?'Consultation outcome is unknown. Do not retry automatically.':'The bundled A2A CLI could not start.'),{outcome:attempts?'unknown':'not_started',retryAllowed:false,cause:error.code});}
   if(upstream?.error)throw remoteError(upstream,upstreamStatus);
   const reply=parse(result.stdout).message;const data=reply?.parts?.find(p=>p.mediaType===CONSULT_MEDIA_TYPE&&p.data)?.data;
   if(!data||data.format!=='zesia.consult.v0'||typeof data.advice!=='string')throw Object.assign(Error('Expected a structured consultation message.'),{outcome:attempts?'unknown':'not_started',retryAllowed:false});
   if(contextId&&reply.contextId!==contextId)throw Error('The consultation response lost its context continuity.');
   return {...data,a2a:{...data.a2a,contextId:reply.contextId,messageId:reply.messageId}};
- }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));await rm(temporary,{recursive:true,force:true});}
+ }finally{deadline?.dispose();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));await rm(temporary,{recursive:true,force:true});}
 }

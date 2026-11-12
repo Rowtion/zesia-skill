@@ -12,3 +12,4 @@ test('guard rejects upstream redirects without forwarding real credentials or re
 test('unknown transport outcomes never cause a second upstream request',async()=>{
  let calls=0;await assert.rejects(consultOverA2A({url:'https://consult.example',token:'synthetic-secret',input,fetch:async()=>{calls++;throw Error('Lost connection after request');}}),e=>e.outcome==='unknown'&&e.retryAllowed===false);assert.equal(calls,1);
 });
+test('actual CLI consultation works with the original Node 20 cancellation API surface',async()=>{const any=AbortSignal.any;let calls=0;try{AbortSignal.any=undefined;const result=await consultOverA2A({url:'https://consult.example',token:'synthetic-cli-secret',input,fetch:async(url,init)=>{calls++;return Response.json({...jsonMessage(),id:JSON.parse(init.body).id});}});assert.equal(result.consultId,'c1');assert.equal(calls,1);}finally{AbortSignal.any=any;}});

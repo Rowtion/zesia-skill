@@ -45,3 +45,5 @@ npm run package
 ```
 
 先发布本 Runtime，再更新消费端。锁文件的 integrity 必须取自实际已发布的不可变 tarball，并验证空缓存安装；本机与 CI 的包即使内容相同，字节也可能不同。在 `main` 显式触发发行，不能覆盖版本。参见 [LICENSE](LICENSE) 和[第三方声明](THIRD_PARTY_NOTICES.md)。
+
+托管升级会将旧安装保留在 `.zesia/skill-backups/`，不参与 Skill 发现；安装器返回备份路径，请检查后自行清理。备份目录通过本地 Git 忽略文件避免误提交。安装器拒绝符号链接及硬链接的内容或缓存文件。

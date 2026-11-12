@@ -45,3 +45,5 @@ npm run package
 ```
 
 Publish this runtime before updating dependent adapters. Generate their lockfile integrity from the actual immutable published tarball, then verify a clean install. Local and CI tarballs may differ in bytes even when their contents match. Release is an explicit workflow on `main`; never overwrite a version. See [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md).
+
+Managed upgrades retain the previous installation under `.zesia/skill-backups/`, outside Skill discovery. The installer returns the backup path; review it before manually removing it. Backups are locally ignored by Git. Symbolic links and hardlinked payload/cache files are refused.
