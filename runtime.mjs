@@ -110,7 +110,7 @@ export function createPortable({
         seen.add(request.id);
         if (typeof answer.text !== 'string' || !answer.text.trim() || answer.text.length > 2000 || typeof answer.sourceRef !== 'string' || !answer.sourceRef.trim()) throw new Error('Each answer needs bounded text and an actual source reference.');
         if (request.kind === 'user_decision' && !answer.sourceQuote?.trim()) throw new Error('Ask the user for the decision and quote their answer. Confirmation is not a decision.');
-        return { ...answer, question: request.question };
+        return { requestId: request.id, question: request.question, text: answer.text, sourceRef: answer.sourceRef, sourceQuote: answer.sourceQuote || '' };
       });
       const packet = structuredClone(parent.packet);
       packet.context.previousAdvice = [...(packet.context.previousAdvice || []), r.decision?.assessment || r.advice, r.decision?.recommendation].filter(Boolean);

@@ -26,7 +26,8 @@
     "./contract": "./runtime/contract.mjs",
     "./configure": "./scripts/configure-shared.mjs",
     "./read-secret": "./scripts/read-secret-shared.mjs",
-    "./install-a2a": "./scripts/install-a2a.mjs"
+    "./install-a2a": "./scripts/install-a2a.mjs",
+    "./install-host": "./adapters/install.mjs"
   },
   "files": [
     "runtime",
@@ -37,6 +38,7 @@
     "SKILL.md",
     "references",
     "LICENSE",
-    "THIRD_PARTY_NOTICES.md"
+    "THIRD_PARTY_NOTICES.md",
+    "adapters"
   ]
 }
