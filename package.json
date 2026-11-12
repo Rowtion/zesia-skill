@@ -1,6 +1,6 @@
 {
   "name": "@zesia/runtime",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "repository": {
@@ -39,6 +39,7 @@
     "references",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
-    "adapters"
+    "adapters",
+    "review"
   ]
 }

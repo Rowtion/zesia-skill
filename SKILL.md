@@ -17,17 +17,30 @@ Write a private packet JSON file, then run:
 node <skill-dir>/scripts/zesia.mjs prepare <packet.json>
 ```
 
-Preparation is local, including validation. No preflight, handshake or model call occurs. In the current conversation, show the question, destination and the actual selected excerpts and attributed statements in readable form. Do not paste the whole JSON wrapper, refer the user to a local file, or claim that review is complete before a draft was returned. Ask for explicit confirmation; do not send on the user's behalf before they answer.
+Preparation is local, including validation. No preflight, handshake or model call occurs. Never paste the packet JSON or full materials into the chat.
 
-## Send the reviewed draft
+## Review and send
 
-After the user confirms, write their exact confirmation words to a private text file and run:
+If the host provides a verified native consultation pane, use that pane. Otherwise open the temporary local browser review:
 
 ```sh
-node <skill-dir>/scripts/zesia.mjs send <draftId> <approvedHash> <confirmation.txt>
+node <skill-dir>/scripts/zesia.mjs review <draftId>
 ```
 
-Use the ID and hash from preparation; the helper sends its immutable stored packet. Do not reconstruct or shorten it after review. The helper uses the same-origin A2A 1.0 service and never retries a paid request. Missing credentials: have the user run `node <skill-dir>/scripts/configure.mjs` in their terminal. Hidden input is stored locally with mode 0600. Do not ask for credentials in chat. `configure.mjs --show` reveals configuration status without the token.
+This starts a private loopback-only service and attempts to open the default browser. If opening is unavailable, show the returned clickable URL as **Review consultation**. Keep the fragment access key on that link; never send it to any external site. Do not expose the URL beyond this user's current conversation. The page shows the exact read-only question, excerpts, attachments and destination. The user clicks Confirm and send there. Do not approve through HTTP, browser automation, curl, another tool, or the chat-only send command on their behalf. Do not claim the draft has been sent merely because the window opened. Do not ask for a second chat confirmation or reconstruct a confirmation request in the composer.
+
+Retrieve the result without resending:
+
+```sh
+node <skill-dir>/scripts/zesia.mjs wait <draftId> 60
+node <skill-dir>/scripts/zesia.mjs result <draftId>
+```
+
+If still pending, leave the link available and wait for the user; read the result again after they confirm. A wait timeout does not authorize a new consultation or another send. Cancellation is persistent. Closing a tab is not cancellation; the local service expires after inactivity or its session lifetime. Local private results remain available to the agent afterwards. Use review again to reopen a received result without a model call.
+
+Only if the user explicitly cannot use a browser or native pane, show the complete selected materials readably in chat and obtain their explicit confirmation. The compatibility command is `send <draftId> <approvedHash> <confirmation.txt>`, using their exact words in a private text file. Never use this fallback to bypass a pending browser review, denial or cancellation.
+
+The helper uses the same-origin A2A 1.0 service and never retries a paid request. Missing credentials: have the user run `node <skill-dir>/scripts/configure.mjs` in their terminal. Hidden input is stored locally with mode 0600. Do not ask for credentials in chat. `configure.mjs --show` reveals configuration status without the token.
 
 ## Use the result and follow up
 
@@ -39,6 +52,6 @@ For actual consultant questions, gather observable evidence within existing perm
 node <skill-dir>/scripts/zesia.mjs followup <previousDraftId> <answers.json>
 ```
 
-This prepares a new local draft on the same A2A context. Review it in chat and obtain a new confirmation before sending. At most three rounds; do not start a new initial consultation to evade the limit.
+This prepares a new local draft on the same A2A context. Open `review <newDraftId>` for a fresh read-only review and confirmation before sending. At most three rounds; do not start a new initial consultation to evade the limit.
 
 For a received result that needs to be shown again, use `result <draftId>`; this reads local state without a model call. If any send outcome is unknown, stop and explain it. Do not re-prepare, resend, split inputs, probe budgets or run handshake calls as an automatic recovery. Local records contain project material: keep them private and do not commit them.

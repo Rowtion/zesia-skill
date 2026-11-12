@@ -95,6 +95,20 @@ export function createPortable({
         await store(record); return present(record);
       }
     },
+    async inspect(id) {
+      const record = await read(id);
+      return {ok:true,draftId:record.id,status:record.status,approvedHash:record.hash,
+        destination:record.destination,packet:structuredClone(record.packet),
+        expiresAt:new Date(record.expiresAt).toISOString(),result:record.result || null};
+    },
+    async cancel(id, approvedHash) {
+      const record=await read(id);
+      if(record.status!=='prepared' || approvedHash!==record.hash || hash(record.packet)!==record.hash)throw Error('Only this exact unsent draft can be cancelled.');
+      const claim=await open(path(id)+'.send','wx',0o600).catch(error=>{if(error.code==='EEXIST')throw Error('This draft was already claimed; cancellation cannot undo a send.');throw error;});
+      await claim.close();
+      record.status='cancelled';record.result={ok:false,status:'cancelled',code:'cancelled',message:'Cancelled before sending. Nothing was sent.',outcome:'not_started',retryAllowed:false};
+      await store(record);return present(record);
+    },
     async result(id) { return present(await read(id), true); },
     async followup(id, answers) {
       const parent = await read(id), r = parent.rawResult;
