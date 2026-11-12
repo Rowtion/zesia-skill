@@ -1,3 +1,4 @@
+import {realpathSync} from 'node:fs';
 import{readFile,writeFile,mkdir,mkdtemp,cp,rm,chmod}from'node:fs/promises';import{execFileSync}from'node:child_process';import{createHash}from'node:crypto';import{join,resolve}from'node:path';import{tmpdir}from'node:os';import{fileURLToPath,pathToFileURL}from'node:url';
 export const A2A_VERSION='0.4.0';
 export const ARTIFACTS={
@@ -18,4 +19,4 @@ export async function installA2A({root=fileURLToPath(new URL('../',import.meta.u
   const data=await readFile(join(extracted,binary));await mkdir(output,{recursive:true});await writeFile(join(output,binary),data,{mode:0o755});await chmod(join(output,binary),0o755);await cp(join(extracted,'LICENSE'),join(output,'A2A-CLI-LICENSE'));const installed={version:A2A_VERSION,platform:platform+'-'+arch,archiveSha256:sha256,binarySha256:createHash('sha256').update(data).digest('hex')};await writeFile(join(output,'installed.json'),JSON.stringify(installed,null,2)+'\n');return installed;
  }finally{await rm(temporary,{recursive:true,force:true});}
 }
-if(process.argv[1]&&pathToFileURL(resolve(process.argv[1])).href===import.meta.url){const at=process.argv.indexOf('--archive');const rt=process.argv.indexOf('--root');console.log(JSON.stringify(await installA2A({...(at>=0?{archivePath:resolve(process.argv[at+1])}:{}),...(rt>=0?{root:resolve(process.argv[rt+1])}:{})})));}
+if(process.argv[1]&&realpathSync(process.argv[1])===realpathSync(fileURLToPath(import.meta.url))){const at=process.argv.indexOf('--archive');const rt=process.argv.indexOf('--root');console.log(JSON.stringify(await installA2A({...(at>=0?{archivePath:resolve(process.argv[at+1])}:{}),...(rt>=0?{root:resolve(process.argv[rt+1])}:{})})));}
