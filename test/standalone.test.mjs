@@ -33,7 +33,8 @@ test('standalone installation, online review, official A2A and agent result requ
    last={format:'zesia.consult.v0',requestId:req.headers['x-zesia-request-id'],consultId:'standalone-one',advice:'Independent synthetic review',deliveryKind:'opinion',qualityStatus:'partial',a2a:{contextId:'standalone-context'}};
    res.end(JSON.stringify({jsonrpc:'2.0',id:rpc.id,result:{message:{messageId:'standalone-reply',contextId:'standalone-context',role:'ROLE_AGENT',parts:[{data:last,mediaType:'application/vnd.zesia.consult+json'}]}}}));
   });await new Promise(resolve=>remote.listen(0,'127.0.0.1',resolve));
-  const env={...process.env,PATH:process.platform==='win32'?process.env.SystemRoot+'\\System32':'/usr/bin:/bin',ZESIA_CONFIG:config,ZESIA_STATE_DIR:join(directory,'state')};
+  const emptyPath=join(directory,'empty-path');await mkdir(emptyPath);
+  const env={...process.env,PATH:process.platform==='win32'?process.env.SystemRoot+'\\System32':emptyPath,ZESIA_CONFIG:config,ZESIA_STATE_DIR:join(directory,'state')};
   // All executable calls use direct paths. No system Node, Bun or global PATH setup.
   if(process.platform!=='win32')await assert.rejects(execute('/bin/sh',['-c','command -v node'],{env}));
   const sourceExe=join(source,'scripts/zesia'+extension);
