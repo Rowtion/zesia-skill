@@ -1,55 +1,53 @@
 English | [简体中文](README.zh-CN.md)
 
-# ZESIA portable Skill and runtime
+# ZESIA shared client
 
-Independent consultation for agents with local Skill and command support. The original agent prepares the evidence, the user reviews it, and the cloud consultant returns advice through A2A. No native button is required.
+Shared Skill, local evidence/consent runtime and official A2A CLI transport for independent
+expert consultation. The cloud consultant stays separate from this public client.
 
-## Install
+Version 0.4 uses one `https://zesia.dev/consult` review page. A short-lived loopback bridge
+shows an immutable local draft and read-only attachments; only explicit browser approval
+starts cloud preflight and A2A. No long-lived token enters the webpage, URL or composer.
+Browser loopback permission may be needed. This is not a remote draft-upload service.
+
+## Usage
+
+Install for your host using the single prompt:
 
 ```text
-Read https://zesia.dev/install.md and install Zesia for this agent.
+Read https://zesia.dev/install.md and install ZESIA for this agent.
 ```
 
-The [versioned releases](https://github.com/Rowtion/zesia-skill/releases) contain a portable Skill ZIP, checksums, source metadata and the `@zesia/runtime` tarball used by host adapters. The website may distribute a separately verified version.
+The guide must point at actually published versions; source implementation does not imply a
+new version has been released. The standalone assets remove the extra Node requirement;
+Node-based compatibility scripts remain for existing installations. Never disable browser
+security, expose the bridge port or require administrator rights.
 
-Verify and extract the Skill, install it in the host's documented Skill directory, then run:
-
-```sh
-node <skill-directory>/scripts/install-a2a.mjs
-node <skill-directory>/scripts/zesia.mjs --help
-node <skill-directory>/scripts/configure.mjs
+```text
+scripts/zesia configure --token-file <private-token-file>
+scripts/zesia prepare <private-packet.json>
+scripts/zesia review <draftId>
+scripts/zesia wait <draftId> 900
+scripts/zesia result <draftId>
 ```
 
-Node.js 20+ and normal file/command permissions are required. The transport installer downloads official a2a-cli 0.4.0 once, checks the pinned platform SHA-256, and retains its Apache-2.0 license. It does not need administrator permissions, a global executable or a private checkout. Configure the trial token in the terminal's hidden input, never in chat.
+Use `.exe` on Windows. Credentials and state stay in private local files. Preparation returns
+compact metadata; materials are shown in the online window, not pasted into the conversation.
+The original agent receives the full opinion plus work-relevant structured fields. Requests
+have stable IDs, result recovery reads the same cloud execution, and unknown outcomes never
+trigger automatic inference retries. A local receipt distinguishes saved from retrieved results.
+Follow-ups use reviewed snapshots and new approval. Advice never grants execution permission.
 
-## Consultation flow
+## Development and distribution
 
-- `prepare <packet.json>` creates a private local draft with zero network calls.
-- `send <draftId> <approvedHash> <confirmation.txt>` sends the exact reviewed draft after explicit confirmation.
-- `result <draftId>` reads the cached local result without a model call.
-- `followup <draftId> <answers.json>` prepares a continuation on the same A2A context; review and confirm again before sending.
+`npm ci --ignore-scripts`, `npm run build`, `npm test`, `npm run package`.
+`npm run build:native` uses pinned Bun 1.3.13 and the pinned official a2a-cli; end users need
+neither toolchain. Mac builds are signed during packaging. Standalone ZIPs contain checksums,
+source/version metadata, licenses and the public JS bundle/rebuild instructions. See
+[NATIVE-NOTICES.md](NATIVE-NOTICES.md). CI release publishes only after all platform builds
+and their no-extra-Node tests pass; versions/assets are immutable.
 
-Read [SKILL.md](SKILL.md) and the [packet reference](references/packet.md). Use the actual agent name and user project for `requester` and `project`; these labels do not establish identity or ownership.
-
-Configuration defaults to `~/.config/zesia/agent.json`; private drafts and results default to `~/.local/state/zesia/consult`. Keep them out of Git. Only selected and approved material is sent. Unknown effects are not retried automatically. The cloud service is stateless; `contextId` correlates rounds rather than retrieving hidden history.
-
-The runtime retains local evidence, consent, credentials and result handling. Official CLI serialization runs behind an ephemeral localhost guard that forwards one approved request to a fixed origin; the real token is not passed to the CLI. This is a local adapter runtime, not a separately published remote SDK or Consult MCP service.
-
-## Develop
-
-```sh
-npm ci --ignore-scripts
-npm run build
-npm test
-npm run package
-```
-
-Publish this runtime before updating dependent adapters. Generate their lockfile integrity from the actual immutable published tarball, then verify a clean install. Local and CI tarballs may differ in bytes even when their contents match. Release is an explicit workflow on `main`; never overwrite a version. See [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md).
-
-Managed upgrades retain the previous installation under `.zesia/skill-backups/`, outside Skill discovery. The installer returns the backup path; review it before manually removing it. Backups are locally ignored by Git. Symbolic links and hardlinked payload/cache files are refused.
-
-## Local review window
-
-Hosts without a verified native pane use `review <draftId>` after preparation. The command opens a temporary local page with read-only materials and attachments; only the user’s explicit click sends the stored packet. `wait <draftId> 60` or `result <draftId>` returns the saved advice to the original agent. No administrator access, cloud draft storage or browser-side trial token is required. The service binds a random 127.0.0.1 port, expires after five minutes idle or fifteen minutes total, and retains private result records for retrieval. Closing a tab does not cancel a request. The page shows actual request status, not a fabricated reasoning stream.
-
-Local review requires the agent runtime and browser to run on the same computer. Remote/cloud coding sessions are not covered by this fallback; do not forward the port or expose the session publicly.
+Chrome loopback permission and local-host operation require actual verification. Remote/SSH
+workspaces, other browsers and each host's real-session behavior have separate support gates;
+do not equate a binary build with universal host acceptance. Website code is trusted software
+that can access its own page memory; local-only draft handling is not a cryptographic claim.

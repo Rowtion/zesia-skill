@@ -1,55 +1,46 @@
 [English](README.md) | 简体中文
 
-# 则灵（zesia）· 通用 Skill 与 Runtime
+# 则灵（zesia）共享客户端
 
-面向支持本地 Skill 和命令的 Agent 提供独立咨询。原 Agent 整理证据，用户审阅后发送，云端顾问通过 A2A 返回建议；不依赖原生按钮。
+共享 Skill、本地咨询资料与授权流程，以及官方 A2A CLI 传输。云端顾问与公开客户端独立。
 
-## 安装
+0.4 版本使用同一个 `https://zesia.dev/consult` 网页。临时本地桥只展示不可变草稿和只读附件，
+用户在网页批准之后才进行云端预检及 A2A 调用。长期 token 不进入网页、网址或消息输入框。
+浏览器可能要求允许连接本机 loopback；确认前不通过远程服务器中转草稿，包括密文中转。
+
+## 使用
+
+所有宿主使用同一安装提示词：
 
 ```text
-Read https://zesia.dev/install.md and install Zesia for this agent.
+Read https://zesia.dev/install.md and install ZESIA for this agent.
 ```
 
-[固定版本发行页](https://github.com/Rowtion/zesia-skill/releases)提供通用 Skill ZIP、校验文件、源提交信息，以及各宿主适配依赖的 `@zesia/runtime` tarball。官网可能分发另行验证过的版本。
+安装指南以实际已发布版本为准，源码完成不代表新版已经发行。独立可执行文件不要求另装
+Node；旧版本兼容脚本保留。不得要求管理员权限、全局 PATH 调整、关闭浏览器安全保护或
+公开转发本地端口。
 
-验证并解压 Skill，将其安装到宿主规定的目录，再运行：
-
-```sh
-node <skill-directory>/scripts/install-a2a.mjs
-node <skill-directory>/scripts/zesia.mjs --help
-node <skill-directory>/scripts/configure.mjs
+```text
+scripts/zesia configure --token-file <私密凭证文件>
+scripts/zesia prepare <私密资料包.json>
+scripts/zesia review <draftId>
+scripts/zesia wait <draftId> 900
+scripts/zesia result <draftId>
 ```
 
-需要 Node.js 20+ 和正常文件/命令权限。传输安装器只在安装时下载官方 a2a-cli 0.4.0，核对固定平台 SHA-256 并保留 Apache-2.0 许可证。不要求管理员权限、全局可执行文件或私有仓库。试用 token 在终端隐藏输入，不要发到聊天里。
+Windows 使用 `.exe`。凭证和状态保存在本地私密文件中；准备命令仅返回简短元数据，
+资料在网页展示，不再整包塞回聊天。原 Agent 取回完整意见和必要结构化字段。
+请求使用稳定 ID，恢复只读同一次云端执行；未知结果不得自动重新推理。
+单独的本地收件记录区分“结果已保存”和“原 Agent 已取回”。追问重新准备并批准新资料。
+意见不构成新的执行授权。
 
-## 咨询流程
+## 研发与发行
 
-- `prepare <packet.json>`：创建私有本地草稿，零网络请求。
-- `send <draftId> <approvedHash> <confirmation.txt>`：明确确认后发送已审阅的原稿。
-- `result <draftId>`：读取本地缓存结果，不调用模型。
-- `followup <draftId> <answers.json>`：在同一 A2A 上下文准备后续草稿，重新审阅并确认后再发送。
+运行 `npm ci --ignore-scripts`、`npm run build`、`npm test`、`npm run package`。
+`npm run build:native` 使用固定 Bun 1.3.13 和官方 A2A CLI；用户不需要这些开发环境。
+Mac 可执行文件在构建时签名。独立包保留校验和、来源版本、许可证、公开 JS 包及重建说明，
+见 [NATIVE-NOTICES.md](NATIVE-NOTICES.md)。所有平台构建和无额外 Node 测试通过后才发布，
+不得覆盖已有版本。
 
-参阅 [SKILL.md](SKILL.md) 和[资料格式](references/packet.md)。`requester` 和 `project` 分别填写实际 Agent 名称与用户项目；这些标签不代表认证身份或所有权。
-
-默认配置保存在 `~/.config/zesia/agent.json`，私有草稿与结果保存在 `~/.local/state/zesia/consult`，不得提交 Git。只发送选定且批准的资料；未知结果不自动重试。云端无状态，`contextId` 只关联多轮请求，不会取回隐藏历史。
-
-Runtime 负责本地证据、确认、凭证和结果处理。官方 CLI 通过瞬时 localhost 守卫向固定地址转发一次批准的请求，真实 token 不交给 CLI。本项目是本地适配 Runtime，不是单独发行的远程 SDK 或 Consult MCP 服务。
-
-## 开发
-
-```sh
-npm ci --ignore-scripts
-npm run build
-npm test
-npm run package
-```
-
-先发布本 Runtime，再更新消费端。锁文件的 integrity 必须取自实际已发布的不可变 tarball，并验证空缓存安装；本机与 CI 的包即使内容相同，字节也可能不同。在 `main` 显式触发发行，不能覆盖版本。参见 [LICENSE](LICENSE) 和[第三方声明](THIRD_PARTY_NOTICES.md)。
-
-托管升级会将旧安装保留在 `.zesia/skill-backups/`，不参与 Skill 发现；安装器返回备份路径，请检查后自行清理。备份目录通过本地 Git 忽略文件避免误提交。安装器拒绝符号链接及硬链接的内容或缓存文件。
-
-## 本地审阅窗口
-
-没有已验证原生面板的宿主，准备资料后运行 `review <draftId>` 打开临时本地网页。页面只读展示资料与附件，只有用户明确点击后才发送已存资料。`wait <draftId> 60` 或 `result <draftId>` 将本地结果交回原 Agent。无需管理员权限、云端草稿暂存或浏览器中的长期试用 token。服务使用 127.0.0.1 随机端口，空闲五分钟或累计十五分钟后退出；私有结果记录保留供取回。关闭标签页不等于取消。页面展示实际请求状态，不制造推理流。
-
-本地审阅要求 Agent 运行环境与浏览器位于同一台电脑；远程/云端编码会话暂不覆盖，不要转发端口或公开暴露审阅会话。
+浏览器权限、本机桥、各宿主真实会话分别验收；远程/SSH 工作区和未验证浏览器不提前声称支持。
+网站脚本是能够读取页面内存的受信代码，本地草稿要求不代表密码学上的服务端不可读取保证。

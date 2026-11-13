@@ -1,6 +1,6 @@
 {
   "name": "@zesia/runtime",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "repository": {
@@ -14,7 +14,8 @@
     "test": "node --test runtime.test.mjs test/*.test.mjs",
     "build": "node scripts/build.mjs",
     "package": "node scripts/package.mjs",
-    "install:a2a": "node scripts/install-a2a.mjs"
+    "install:a2a": "node scripts/install-a2a.mjs",
+    "build:native": "node scripts/build-native.mjs"
   },
   "exports": {
     "./a2a": "./runtime/a2a.mjs",
@@ -40,6 +41,8 @@
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
     "adapters",
-    "review"
+    "review",
+    "third_party/bun",
+    "NATIVE-NOTICES.md"
   ]
 }
