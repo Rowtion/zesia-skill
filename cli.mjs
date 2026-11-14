@@ -52,7 +52,7 @@ try {
     const seconds=hash===undefined?600:Number(hash);
     if(!Number.isFinite(seconds)||seconds<1||seconds>900)throw Error('Use wait <draftId> [seconds], between 1 and 900.');
     const until=Date.now()+seconds*1000;
-    while(true){value=await runtime.result(id,{markReceived:true});if(value.status==='completed'||value.code==='cancelled'||value.retryAllowed===false||value.outcome||Date.now()>=until)break;await pause(500);}
+    while(true){value=await runtime.result(id,{markReceived:true});if(value.status==='completed'||value.code==='cancelled'||(!value.pending&&(value.retryAllowed===false||value.outcome))||Date.now()>=until)break;await pause(500);}
     if(value.code==='result_unavailable')value={ok:true,status:value.status,draftId:id,pending:true,hint:'The local result is not ready. Use result later; do not send or prepare a duplicate.'};
   }
   else if(command==='--help')value={commands:['configure [--token-file <file>]','install <project> [--upgrade]','prepare <packet.json>','review <draftId> [--no-open]','wait <draftId> [seconds:1-900]','result <draftId>','followup <draftId> <answers.json>','send <draftId> <approvedHash> <confirmation.txt> (legacy explicit-confirmation interface)'],note:'Preparation is local. Use review for the shared zesia.dev window. Only its approval sends materials. Use the standalone executable when Node is unavailable; no administrator access.'};
