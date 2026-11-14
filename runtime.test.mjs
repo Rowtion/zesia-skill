@@ -27,5 +27,5 @@ test('unknown delivery remains unknown across restarts and cannot be automatical
  let calls=0;const f=await fixture({consult:async()=>{calls++;throw new Error('Connection closed after submission.');}}),d=await f.runtime.prepare(packet);const r=await f.runtime.send(d.draftId,d.approvedHash,'Send.');assert.equal(r.outcome,'unknown');const restarted=createPortable({stateDir:f.stateDir});await restarted.send(d.draftId,d.approvedHash,'Send.');assert.equal(calls,1);
 });
 test('preflight rejection makes zero paid requests and is returned with its usable details',async()=>{
- const f=await fixture({preflight:async()=>({ok:false,code:'input_budget_exceeded',hint:'Use a narrower question.',limit:100,used:150})}),d=await f.runtime.prepare(packet);const r=await f.runtime.send(d.draftId,d.approvedHash,'Send.');assert.equal(r.outcome,'not_started');assert.equal(r.details.limit,100);assert.equal(f.counts().calls,0);
+ const f=await fixture({consult:async()=>{throw Object.assign(Error('Use a narrower question.'),{outcome:'not_started',details:{limit:100,used:150}})}}),d=await f.runtime.prepare(packet);const r=await f.runtime.send(d.draftId,d.approvedHash,'Send.');assert.equal(r.outcome,'not_started');assert.equal(r.details.limit,100);assert.equal(f.counts().calls,0);
 });

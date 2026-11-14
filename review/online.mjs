@@ -22,10 +22,10 @@ export async function startOnlineReview({runtime,draftId,onlineOrigin='https://z
   const chunks=[];let size=0;for await(const part of req){size+=part.length;if(size>2048)throw Error('The approval exceeds 2 KiB.');chunks.push(part);}
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
  }
- async function view(){
+ async function view(compact=false){
   if(!busy)await runtime.recover?.(draftId).catch(()=>{});
-  const data=await runtime.inspect(draftId);
-  return {...data,protocolVersion:ONLINE_PROTOCOL,requestInProgress:busy,...(lastError?{bridgeError:lastError}:{}),resultRetentionSeconds:86400};
+  const data=await runtime.inspect(draftId,{compact});
+  return {...data,compactStatus:true,protocolVersion:ONLINE_PROTOCOL,requestInProgress:busy,...(lastError?{bridgeError:lastError}:{}),resultRetentionSeconds:86400};
  }
  const server=createServer(async(req,res)=>{
   try{
@@ -41,6 +41,7 @@ export async function startOnlineReview({runtime,draftId,onlineOrigin='https://z
    if(!equal(req.headers.authorization,'Bearer '+capability))return reply(res,403,{ok:false,message:'This review session has expired or is not authorized.'});
    if(Date.now()-lastActivity>idleMs||(!busy&&Date.now()-started>lifetimeMs))return reply(res,410,{ok:false,message:'This review connection expired. Reopen it from your agent.'});
    lastActivity=Date.now();
+   if(req.method==='GET'&&req.url==='/bridge/v1/status?compact=1')return reply(res,200,await view(true));
    if(req.method==='GET'&&['/bridge/v1/view','/bridge/v1/status'].includes(req.url))return reply(res,200,await view());
    if(req.method!=='POST'||!['/bridge/v1/approve','/bridge/v1/cancel'].includes(req.url))return reply(res,404,{ok:false,message:'Unknown bridge operation.'});
    const input=await body(req);

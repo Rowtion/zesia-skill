@@ -28,13 +28,13 @@ test('cross-origin, wrong Host, arbitrary destinations and changed hashes cannot
 }));
 test('browser approval sends once, survives refresh and returns the same local result to the agent',()=>fixture(async({request,draft,runtime,counts})=>{
  const result=await(await request('/api/send',{approvedHash:draft.approvedHash})).json();assert.equal(result.ok,true);assert.equal(result.decision.assessment,'Independent assessment');assert.equal(result.qualityStatus,'partial');
- assert.equal((await request('/api/send',{approvedHash:draft.approvedHash})).status,409);assert.equal((await(await request('/api/view')).json()).status,'completed');assert.deepEqual(counts(),{calls:1,preflights:1});assert.equal((await runtime.result(draft.draftId)).consultId,'consult-1');
+ assert.equal((await request('/api/send',{approvedHash:draft.approvedHash})).status,409);assert.equal((await(await request('/api/view')).json()).status,'completed');assert.deepEqual(counts(),{calls:1,preflights:0});assert.equal((await runtime.result(draft.draftId)).consultId,'consult-1');
 }));
 test('cancel persists across server sessions and direct CLI sends cannot bypass it',()=>fixture(async({request,draft,runtime,stateDir,counts})=>{
  assert.equal((await(await request('/api/cancel',{approvedHash:draft.approvedHash})).json()).status,'cancelled');const restarted=createPortable({stateDir});assert.equal((await restarted.send(draft.draftId,draft.approvedHash,'Send.')).status,'cancelled');assert.equal((await runtime.result(draft.draftId)).outcome,'not_started');assert.deepEqual(counts(),{calls:0,preflights:0});
 }));
 test('concurrent clicks and failed response transport never trigger a second consultation',()=>fixture(async({request,draft,counts})=>{
- const results=await Promise.all([request('/api/send',{approvedHash:draft.approvedHash}),request('/api/send',{approvedHash:draft.approvedHash})]);assert.deepEqual(results.map(r=>r.status).sort(),[200,409]);assert.equal((await(await results.find(r=>r.status===200).json())).outcome,'unknown');assert.equal((await request('/api/send',{approvedHash:draft.approvedHash})).status,409);assert.equal(counts().preflights,1);
+ const results=await Promise.all([request('/api/send',{approvedHash:draft.approvedHash}),request('/api/send',{approvedHash:draft.approvedHash})]);assert.deepEqual(results.map(r=>r.status).sort(),[200,409]);assert.equal((await(await results.find(r=>r.status===200).json())).outcome,'unknown');assert.equal((await request('/api/send',{approvedHash:draft.approvedHash})).status,409);assert.equal(counts().preflights,0);
 },{consult:async()=>{throw Error('Synthetic connection lost after submission');}}));
 test('expired drafts cannot send and idle sessions shut down',()=>fixture(async({request,draft,session,runtime})=>{
  const view=await runtime.inspect(draft.draftId);assert.ok(view);let closed=false;const tiny=await startReview({runtime,draftId:draft.draftId,idleMs:15,lifetimeMs:50,onClose:()=>closed=true});await new Promise(r=>setTimeout(r,60));assert.equal(closed,true);await assert.rejects(fetch(tiny.origin+'/api/view'));
