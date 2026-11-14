@@ -55,8 +55,15 @@ test('standalone installation, online review, official A2A and agent result requ
   assert.equal(result.consultId,'standalone-one');assert.equal(calls,1);
   assert.equal(typeof(await(await fetch(local+'/bridge/v1/status',{headers})).json()).agentReceivedAt,'number');
  }finally{
-  if(bridgePid){try{process.kill(bridgePid,'SIGTERM');}catch{}}
+  if(bridgePid){
+   try{process.kill(bridgePid,'SIGTERM');}catch{}
+   // Windows keeps a running executable locked until process termination settles.
+   for(let i=0;i<30;i++){
+    try{process.kill(bridgePid,0);}catch{break;}
+    await new Promise(resolve=>setTimeout(resolve,100));
+   }
+  }
   if(remote){remote.closeAllConnections();await new Promise(r=>remote.close(r));}
-  await rm(directory,{recursive:true,force:true});
+  await rm(directory,{recursive:true,force:true,maxRetries:20,retryDelay:100});
  }
 });
