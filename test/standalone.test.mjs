@@ -21,7 +21,7 @@ test('standalone installation, online review, official A2A and agent result requ
   let seed=resolve(dirname(binary),'../bin');try{await access(seed);}catch{seed=join(repo,'bin');}await cp(seed,join(source,'bin'),{recursive:true});
   for(const file of ['SKILL.md','references','LICENSE','THIRD_PARTY_NOTICES.md'])await cp(join(repo,file),join(source,file),{recursive:true});
   await cp(join(repo,'scripts/install-a2a.mjs'),join(source,'scripts/install-a2a.mjs'));
-  const host={id:'codex',version:'0.3.0',runtimeVersion:'0.4.0',skillDirectory:'.agents/skills',requester:'Codex'};
+  const host={id:'codex',version:'0.3.0',runtimeVersion:JSON.parse(await readFile(join(repo,'package.json'),'utf8')).version,skillDirectory:'.agents/skills',requester:'Codex'};
   await writeFile(join(source,'host.json'),JSON.stringify(host));
   remote=createServer(async(req,res)=>{
    const url=new URL(req.url,'http://localhost');res.setHeader('content-type','application/json');
