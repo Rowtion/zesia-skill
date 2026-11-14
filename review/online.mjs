@@ -6,6 +6,7 @@ export const ONLINE_PROTOCOL=1;
 export const ONLINE_ORIGINS=Object.freeze(['https://zesia.dev','https://zesia-public-staging.cprindex.workers.dev']);
 const equal=(a,b)=>typeof a==='string'&&Buffer.byteLength(a)===Buffer.byteLength(b)&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
 const approvalKeys=['approvedHash','destination','draftId','protocolVersion','requestId'];
+const configureKeys=['destination','protocolVersion','token'];
 export async function startOnlineReview({runtime,draftId,onlineOrigin='https://zesia.dev',idleMs=5*60_000,lifetimeMs=15*60_000,onClose=()=>{}}){
  if(!ONLINE_ORIGINS.includes(onlineOrigin))throw Error('The online review origin is not supported.');
  const initial=await runtime.inspect(draftId);
@@ -43,8 +44,15 @@ export async function startOnlineReview({runtime,draftId,onlineOrigin='https://z
    lastActivity=Date.now();
    if(req.method==='GET'&&req.url==='/bridge/v1/status?compact=1')return reply(res,200,await view(true));
    if(req.method==='GET'&&['/bridge/v1/view','/bridge/v1/status'].includes(req.url))return reply(res,200,await view());
-   if(req.method!=='POST'||!['/bridge/v1/approve','/bridge/v1/cancel'].includes(req.url))return reply(res,404,{ok:false,message:'Unknown bridge operation.'});
+   if(req.method!=='POST'||!['/bridge/v1/approve','/bridge/v1/cancel','/bridge/v1/configure'].includes(req.url))return reply(res,404,{ok:false,message:'Unknown bridge operation.'});
    const input=await body(req);
+   if(req.url==='/bridge/v1/configure'){
+    if(!input||Array.isArray(input)||Object.keys(input).sort().join(',')!==configureKeys.join(','))return reply(res,400,{ok:false,message:'Invalid configuration payload.'});
+    if(input.protocolVersion!==ONLINE_PROTOCOL)return reply(res,400,{ok:false,message:'Unsupported bridge protocol version.'});
+    if(typeof runtime.configure!=='function')return reply(res,501,{ok:false,message:'Bridge configuration is not supported.'});
+    await runtime.configure({destination:input.destination,token:input.token});
+    return reply(res,200,await view());
+   }
    if(!input||Array.isArray(input)||Object.keys(input).sort().join(',')!==approvalKeys.join(','))return reply(res,400,{ok:false,message:'Only the exact reviewed approval is accepted.'});
    const current=await runtime.inspect(draftId);
    if(input.protocolVersion!==ONLINE_PROTOCOL||input.draftId!==draftId||input.requestId!==current.requestId||input.approvedHash!==current.approvedHash||input.destination!==current.destination)return reply(res,409,{ok:false,message:'The reviewed request changed. Nothing new was sent.'});
