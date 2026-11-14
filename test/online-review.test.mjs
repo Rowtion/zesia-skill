@@ -50,7 +50,10 @@ test('approval starts exactly one execution; polling, duplicate clicks and agent
   const clicks=await Promise.all(Array.from({length:8},()=>s.request('approve',s.approval)));
   assert.ok(clicks.every(r=>r.status===202));
   const during=await(await s.request('status')).json();assert.equal(during.requestInProgress,true);
-  await s.started;assert.equal(s.counts().calls,1);assert.equal(s.counts().preflights,1);
+  await s.started;assert.equal(s.counts().calls,1);assert.equal(s.counts().preflights,0);
+  const progress=await(await s.request('status?compact=1')).json();
+  assert.equal(progress.requestInProgress,true);
+  for(const key of ['packet','result','rawResult'])assert.equal(Object.hasOwn(progress,key),false);
   const stored=JSON.parse(await readFile(join(s.directory,s.prepared.draftId+'.json'),'utf8'));assert.equal(stored.approval.requestId,s.prepared.requestId);
   s.release();
   let value;

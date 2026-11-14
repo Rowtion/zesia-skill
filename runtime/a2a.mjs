@@ -19,7 +19,15 @@ const hash=value=>createHash('sha256').update(canonical(value)).digest();
 const parse=text=>{try{return JSON.parse(text);}catch{return {};}};
 function remoteError(payload,status){
  const body=payload?.error;const info=body?.data?.find?.(r=>r?.['@type']==='type.googleapis.com/google.rpc.ErrorInfo'&&r.domain==='a2a-protocol.org');
- return Object.assign(new Error(typeof body==='string'?body:body?.message||'The consultation request did not complete.'),{code:info?.metadata?.consultCode||'consult_transport_error',...(info?.metadata?{metadata:info.metadata}:{}),status});
+ const metadata=info?.metadata||{};
+ const failure=parse(metadata.failure||'{}')||{};
+ const diagnostic=metadata.diagnostic?parse(metadata.diagnostic):failure.preflight;
+ const rejected=metadata.outcome==='not_started'||failure.outcome==='not_started'||diagnostic?.ok===false||body?.data?.outcome==='not_started';
+ return Object.assign(new Error(typeof body==='string'?body:body?.message||'The consultation request did not complete.'),{
+   code:metadata.consultCode||body?.data?.reason||'consult_transport_error',status,metadata,
+   outcome:rejected?'not_started':'unknown',retryAllowed:false,
+   details:{...failure,...(diagnostic?{preflight:diagnostic}:{})},
+ });
 }
 async function bounded(response){const text=await response.text();if(Buffer.byteLength(text)>MAX_RESPONSE)throw Error('The consultation response exceeded the size limit.');return parse(text);}
 export async function preflightConsult({url,token,input,signal,fetch:transport=fetch}){
@@ -51,14 +59,14 @@ export async function consultOverA2A({url,token,input,contextId,clientRequestId,
   deadline=deadlineFor(signal);
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});
   const endpoint='http://127.0.0.1:'+server.address().port+'/a2a';
-  await writeFile(join(temporary,'request.json'),JSON.stringify({message}),{mode:0o600});
+  await writeFile(join(temporary,'request.json'),JSON.stringify({message,configuration:{acceptedOutputModes:[CONSULT_MEDIA_TYPE]}}),{mode:0o600});
   // Only a disposable loopback nonce reaches the CLI. The real token never enters CLI args, files or environment.
   await writeFile(join(temporary,'config.json'),JSON.stringify({auth:`Bearer ${nonce}`,'credential-helper':[],'plugins-enabled':false}),{mode:0o600});
   const allowed=new Set(['PATH','Path','HOME','USERPROFILE','SYSTEMROOT','SystemRoot','WINDIR','TEMP','TMP','TMPDIR','LANG','LC_ALL','SSL_CERT_FILE','SSL_CERT_DIR']);
   const env=Object.fromEntries(Object.entries(process.env).filter(([k])=>allowed.has(k)));
   let result;
   try{result=await execute(cliBinary,['send','--endpoint',endpoint,'--transport','jsonrpc','--request-payload',join(temporary,'request.json'),'--config',join(temporary,'config.json'),'--a2a-version','1.0','--timeout','60s','--output','json'],{cwd:temporary,env,signal:deadline.signal,maxBuffer:6*1024*1024,timeout:65000,windowsHide:true});}
-  catch(error){throw Object.assign(upstream?.error?remoteError(upstream,upstreamStatus):new Error(attempts?'Consultation outcome is unknown. Do not retry automatically.':'The bundled A2A CLI could not start.'),{outcome:attempts?'unknown':'not_started',retryAllowed:false,cause:error.code});}
+  catch(error){if(upstream?.error)throw remoteError(upstream,upstreamStatus);throw Object.assign(new Error(attempts?'Consultation outcome is unknown. Do not retry automatically.':'The bundled A2A CLI could not start.'),{outcome:attempts?'unknown':'not_started',retryAllowed:false,cause:error.code});}
   if(upstream?.error)throw remoteError(upstream,upstreamStatus);
   const reply=parse(result.stdout).message;const data=reply?.parts?.find(p=>p.mediaType===CONSULT_MEDIA_TYPE&&p.data)?.data;
   if(!data||data.format!=='zesia.consult.v0'||typeof data.advice!=='string')throw Object.assign(Error('Expected a structured consultation message.'),{outcome:attempts?'unknown':'not_started',retryAllowed:false});

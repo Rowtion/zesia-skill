@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { validatePacket } from './runtime/workflow.mjs';
 import { readConfig, destinationOf } from './runtime/config.mjs';
-import { consultOverA2A, preflightConsult, recoverConsult } from './runtime/a2a.mjs';
+import { consultOverA2A, recoverConsult } from './runtime/a2a.mjs';
 
 export function portableEnvironment(env = process.env) {
   return { ...env, ZESIA_CONFIG: env.ZESIA_CONFIG || join(homedir(), '.config/zesia/agent.json') };
@@ -23,7 +23,7 @@ function check(packet) {
 export function createPortable({
   stateDir = process.env.ZESIA_STATE_DIR || join(homedir(), '.local/state/zesia/consult'),
   configuration = () => readConfig(portableEnvironment(), { requireToken: false }),
-  preflight = preflightConsult, consult = consultOverA2A, recover = recoverConsult, now = Date.now,
+  consult = consultOverA2A, recover = recoverConsult, now = Date.now,
 } = {}) {
   const path = id => {
     if (!/^[0-9a-f-]{36}$/.test(id || '')) throw new Error('Invalid draft ID.');
@@ -120,13 +120,9 @@ export function createPortable({
       try { claim = await open(path(id)+'.send', 'wx', 0o600); }
       catch (error) { if (error.code === 'EEXIST') return { ok: false, code: 'send_already_claimed', hint: 'Read the local result; do not resend.' }; throw error; }
       await claim.close();
-      let stageName = 'preflight';
       try {
         record.approval={hash:record.hash,requestId:record.requestId,destination:record.destination,confirmation:confirmation.trim(),at:now()};
-        record.status = 'preflight'; await store(record);
-        const pre = await preflight({ url: config.url, token: config.token, input: record.packet, signal: AbortSignal.timeout(15000) });
-        if (!pre.ok) throw Object.assign(new Error(pre.hint || pre.message || 'Preflight rejected the packet.'), { code: pre.code || 'preflight_rejected', details: pre });
-        stageName = 'consultation'; record.status = 'unknown'; await store(record);
+        record.status = 'unknown'; await store(record);
         const response = await consult({ url: config.url, token: config.token, input: record.packet,
           contextId: record.continuation?.contextId, requestId: record.requestId, signal: AbortSignal.timeout(60000) });
         // Keep the full result locally. Return work-relevant fields once, without
@@ -134,15 +130,17 @@ export function createPortable({
         return await acceptResponse(record,response);
       } catch (error) {
         const latest=await read(id);if(latest.status==='completed')return present(latest,true);
-        record.status = stageName === 'preflight' ? 'failed' : 'unknown';
+        record.status = error.outcome === 'not_started' ? 'failed' : 'unknown';
         record.result = { ok: false, code: error.code || 'consultation_unavailable', message: error.message,
-          stage: stageName, outcome: stageName === 'preflight' ? 'not_started' : 'unknown', retryAllowed: false,
+          stage: error.details?.stage || 'consultation', outcome: record.status === 'failed' ? 'not_started' : 'unknown', retryAllowed: false,
           ...(error.details ? { details: error.details } : {}) };
         await store(record); return present(record);
       }
     },
-    async inspect(id) {
+    async inspect(id, { compact = false } = {}) {
       const record = await read(id);
+      if(compact)return {status:record.status,agentReceivedAt:await receivedAt(id),
+        ...(record.result?.ok===false?{result:{message:record.result.message}}:{})};
       return {ok:true,draftId:record.id,requestId:record.requestId,status:record.status,approvedHash:record.hash,
         destination:record.destination,packet:structuredClone(record.packet),
         expiresAt:new Date(record.expiresAt).toISOString(),result:record.result || null,rawResult:record.rawResult||null,agentReceivedAt:await receivedAt(id)};
