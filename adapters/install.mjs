@@ -1,6 +1,6 @@
-import {realpathSync} from 'node:fs';
+import {realpathSync,existsSync} from 'node:fs';
 import {mkdir, mkdtemp, readFile, readdir, lstat, realpath, cp, rm, rename, writeFile, open, unlink} from 'node:fs/promises';
-import {resolve, join, relative, isAbsolute, sep} from 'node:path';
+import {resolve, join, relative, isAbsolute, sep, basename} from 'node:path';
 import {randomUUID, createHash} from 'node:crypto';
 import {pathToFileURL, fileURLToPath} from 'node:url';
 
@@ -127,7 +127,7 @@ export async function install({project, source, host, cliSeedDirectory, upgrade=
     await handle.close();await unlink(lock);
   }
 }
-if(process.argv[1] && realpathSync(process.argv[1])===realpathSync(fileURLToPath(import.meta.url))) {
+if(typeof Bun!=='undefined'?import.meta.main:(process.argv[1] && existsSync(process.argv[1]) && basename(realpathSync(process.argv[1]))==='install.mjs' && realpathSync(process.argv[1])===realpathSync(fileURLToPath(import.meta.url)))) {
   const source=fileURLToPath(new URL('./',import.meta.url));
   const host=JSON.parse(await readFile(join(source,'host.json'),'utf8'));
   const args=process.argv.slice(2);if(!args[0]||args.slice(1).some(arg=>arg!=='--upgrade'))throw Error('Provide the target project directory and optionally --upgrade.');

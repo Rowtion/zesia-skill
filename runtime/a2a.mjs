@@ -9,6 +9,7 @@ import {randomUUID, createHash, timingSafeEqual} from 'node:crypto';
 import assert from 'node:assert/strict';
 import {destinationOf} from './config.mjs';
 import {deadlineFor} from './deadline.mjs';
+import {executableA2A} from './standalone.mjs';
 export {CONSULT_MEDIA_TYPE, A2A_PROTOCOL_VERSION} from './contract.mjs';
 import {CONSULT_MEDIA_TYPE} from './contract.mjs';
 const execute=promisify(execFile);
@@ -27,7 +28,8 @@ export async function preflightConsult({url,token,input,signal,fetch:transport=f
  if(value.format!=='zesia.consult.preflight.v1'||typeof value.ok!=='boolean'||value.modelCalls!==0)throw Object.assign(Error('Invalid preflight response.'),{code:'preflight_unavailable'});return value;
 }
 /** Official CLI owns A2A serialization. An ephemeral local guard owns credentials and one fixed upstream request. */
-export async function consultOverA2A({url,token,input,contextId,clientRequestId,signal,fetch:transport=fetch,onStage=()=>{},cliBinary=process.env.ZESIA_A2A_CLI||fileURLToPath(new URL('../bin/a2a'+(process.platform==='win32'?'.exe':''),import.meta.url))}){
+export async function consultOverA2A({url,token,input,contextId,clientRequestId,requestId,signal,fetch:transport=fetch,onStage=()=>{},cliBinary=process.env.ZESIA_A2A_CLI||executableA2A()||fileURLToPath(new URL('../bin/a2a'+(process.platform==='win32'?'.exe':''),import.meta.url))}){
+ if(requestId!==undefined&&!/^zrq-\d{13}-[a-f0-9-]{36}$/.test(requestId))throw Error('Invalid recoverable request ID.');
  const origin=destinationOf(url);assert.ok(typeof token==='string'&&token&&!/[\s\x00-\x1f\x7f]/u.test(token),'Configure a valid Zesia token.');
  if(clientRequestId!==undefined&&(typeof clientRequestId!=='string'||!clientRequestId||clientRequestId.length>200))throw Error('Invalid client request ID.');
  const message={messageId:clientRequestId||randomUUID(),role:'ROLE_USER',...(contextId?{contextId}:{}),parts:[{data:input,mediaType:CONSULT_MEDIA_TYPE}]};
@@ -40,7 +42,7 @@ export async function consultOverA2A({url,token,input,contextId,clientRequestId,
    const body=JSON.parse(Buffer.concat(chunks).toString());
    if(body.method!=='SendMessage'||!timingSafeEqual(hash(body.params?.message),expected)||attempts!==0){response.writeHead(409);response.end('{}');return;}
    attempts++;onStage('cloud_consultation');
-   const remote=await transport(origin+'/a2a',{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json','a2a-version':'1.0'},body:JSON.stringify(body),redirect:'error',signal:deadline.signal});
+   const remote=await transport(origin+'/a2a',{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json','a2a-version':'1.0',...(requestId?{'x-zesia-request-id':requestId}:{})},body:JSON.stringify(body),redirect:'error',signal:deadline.signal});
    upstreamStatus=remote.status;upstream=await bounded(remote);
    response.writeHead(remote.status,{'content-type':'application/json'});response.end(JSON.stringify(upstream));
   }catch{response.writeHead(502,{'content-type':'application/json'});response.end(JSON.stringify({jsonrpc:'2.0',id:null,error:{code:-32603,message:'The fixed consultation endpoint did not return a usable response.'}}));}
@@ -63,4 +65,13 @@ export async function consultOverA2A({url,token,input,contextId,clientRequestId,
   if(contextId&&reply.contextId!==contextId)throw Error('The consultation response lost its context continuity.');
   return {...data,a2a:{...data.a2a,contextId:reply.contextId,messageId:reply.messageId}};
  }finally{deadline?.dispose();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));await rm(temporary,{recursive:true,force:true});}
+}
+
+export async function recoverConsult({url,token,requestId,signal,fetch:transport=fetch}) {
+ if(!/^zrq-\d{13}-[a-f0-9-]{36}$/.test(requestId||''))throw Error('Invalid recoverable request ID.');
+ const response=await transport(destinationOf(url)+'/v1/consult/requests/'+requestId,{headers:{authorization:'Bearer '+token},redirect:'error',signal});
+ const value=await bounded(response);
+ if(!response.ok)throw Object.assign(Error(response.status===404?'No saved result is available yet.':'The saved consultation could not be read.'),{status:response.status,retryAllowed:false});
+ if(value.requestId!==requestId||typeof value.state!=='string')throw Error('Invalid saved consultation response.');
+ return value;
 }
