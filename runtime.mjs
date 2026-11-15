@@ -132,26 +132,57 @@ export function createPortable({
       } catch (error) {
         const latest=await read(id);if(latest.status==='completed')return present(latest,true);
         record.status = error.outcome === 'not_started' ? 'failed' : 'unknown';
+        const reauthRequired = record.status === 'failed'
+          && (error.status === 401 || error.code === 'unauthorized' || error.code === 'authentication_failed');
+        record.reauthRequired = reauthRequired;
         record.result = { ok: false, code: error.code || 'consultation_unavailable', message: error.message,
           stage: error.details?.stage || 'consultation', outcome: record.status === 'failed' ? 'not_started' : 'unknown', retryAllowed: false,
+          ...(reauthRequired ? { reauthRequired: true } : {}),
           ...(error.details ? { details: error.details } : {}) };
-        await store(record); return present(record);
+        await store(record);
+        if (reauthRequired) {
+          await unlink(path(id) + '.send').catch(err => { if (err.code !== 'ENOENT') throw err; });
+        }
+        return present(record);
       }
     },
-    async configure({ destination, token }) {
+    async configure({ destination, token, draftId }) {
       if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{32,256}$/u.test(token)) throw new Error('Invalid activation token.');
       const url = destinationOf(destination);
       if (process.env.ZESIA_URL && destinationOf(process.env.ZESIA_URL) !== url) throw new Error('The configured destination does not match ZESIA_URL.');
       await saveConfiguration({ url, token });
+      if (draftId) {
+        let claim = null;
+        try {
+          claim = await open(path(draftId) + '.send', 'wx', 0o600);
+        } catch (error) {
+          if (error.code !== 'EEXIST') throw error;
+        }
+        if (claim) {
+          try {
+            const record = await read(draftId);
+            if (record.status === 'failed' && record.reauthRequired && now() <= record.expiresAt) {
+              record.status = 'prepared';
+              delete record.reauthRequired;
+              delete record.result;
+              await store(record);
+            }
+          } finally {
+            await claim.close();
+            await unlink(path(draftId) + '.send').catch(err => { if (err.code !== 'ENOENT') throw err; });
+          }
+        }
+      }
       return { ok: true, configured: true, destination: url };
     },
     async inspect(id, { compact = false } = {}) {
       const record = await read(id);
       const config = await configuration().catch(() => null);
       const configured = Boolean(config?.token);
-      if(compact)return {status:record.status,configured,agentReceivedAt:await receivedAt(id),
+      const reauthRequired = Boolean(record.reauthRequired);
+      if(compact)return {status:record.status,configured,reauthRequired,agentReceivedAt:await receivedAt(id),
         ...(record.result?.ok===false?{result:{message:record.result.message}}:{})};
-      return {ok:true,draftId:record.id,requestId:record.requestId,status:record.status,configured,approvedHash:record.hash,
+      return {ok:true,draftId:record.id,requestId:record.requestId,status:record.status,configured,reauthRequired,approvedHash:record.hash,
         destination:record.destination,packet:structuredClone(record.packet),
         expiresAt:new Date(record.expiresAt).toISOString(),result:record.result || null,rawResult:record.rawResult||null,agentReceivedAt:await receivedAt(id)};
     },

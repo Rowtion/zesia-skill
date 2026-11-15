@@ -50,7 +50,12 @@ export async function startOnlineReview({runtime,draftId,onlineOrigin='https://z
     if(!input||Array.isArray(input)||Object.keys(input).sort().join(',')!==configureKeys.join(','))return reply(res,400,{ok:false,message:'Invalid configuration payload.'});
     if(input.protocolVersion!==ONLINE_PROTOCOL)return reply(res,400,{ok:false,message:'Unsupported bridge protocol version.'});
     if(typeof runtime.configure!=='function')return reply(res,501,{ok:false,message:'Bridge configuration is not supported.'});
-    await runtime.configure({destination:input.destination,token:input.token});
+    const current=await runtime.inspect(draftId);
+    let targetDestination;
+    try{targetDestination=new URL(input.destination).origin;}catch{return reply(res,400,{ok:false,message:'Invalid configuration destination.'});}
+    if(targetDestination!==current.destination)return reply(res,409,{ok:false,message:'Activation destination does not match the prepared request.'});
+    await runtime.configure({destination:targetDestination,token:input.token,draftId});
+    lastError=null;
     return reply(res,200,await view());
    }
    if(!input||Array.isArray(input)||Object.keys(input).sort().join(',')!==approvalKeys.join(','))return reply(res,400,{ok:false,message:'Only the exact reviewed approval is accepted.'});
