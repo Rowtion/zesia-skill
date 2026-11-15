@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, readFile, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createPortable } from './runtime.mjs';
@@ -72,4 +72,64 @@ test('ackConsult posts to /v1/consult/requests/:id/ack and rejects malformed ids
  assert.equal(seen[0].url,'https://api.zesia.dev/v1/consult/requests/zrq-1700000000000-00000000-0000-0000-0000-000000000000/ack');
  assert.equal(seen[0].init.method,'POST');
  assert.equal(seen[0].init.headers.authorization,'Bearer synthetic-token-value-12345678901234');
+});
+test('list and clean preview, protect unknown/links, redact terminal drafts, and preserve anti-replay',async()=>{
+ let clock=1_700_000_000_000,calls=0;
+ const f=await fixture({
+  now:()=>clock,
+  consult:async args=>{
+   calls++;
+   if(args.input?.brief==='MAKE_UNKNOWN')throw new Error('Lost connection');
+   return{format:'zesia.consult.v0',consultId:'c-'+calls,advice:'SECRET_ADVICE_BODY',decision:{assessment:'SECRET_ADVICE_BODY',recommendation:'Keep lock.'},a2a:{contextId:'ctx'},qualityStatus:'complete_structure'};
+  },
+ });
+ // 1. Completed draft
+ const doneDraft=await f.runtime.prepare({requester:'Codex',project:'p',brief:'SECRET_DONE_BRIEF',context:{goal:'g',materials:[{id:'m',content:'SECRET_DONE_MAT'}]}});
+ await f.runtime.send(doneDraft.draftId,doneDraft.approvedHash,'Send.');
+ // 2. Unknown draft (must always be protected)
+ const unkDraft=await f.runtime.prepare({requester:'Codex',project:'p',brief:'MAKE_UNKNOWN',context:{goal:'g',materials:[{id:'m',content:'x'}]}});
+ await f.runtime.send(unkDraft.draftId,unkDraft.approvedHash,'Send.');
+ // 3. Unsent draft that expires
+ const expDraft=await f.runtime.prepare(packet);
+ clock+=20*60*1000;
+ // 4. Non-ZESIA file & symlink safety
+ await writeFile(join(f.stateDir,'notes.txt'),'keep-me');
+ const targetOutside=join(f.stateDir,'outside-target.txt');
+ await writeFile(targetOutside,'do-not-delete');
+ await symlink(targetOutside,join(f.stateDir,'11111111-1111-4111-8111-111111111111.json'));
+
+ const inv=await f.runtime.list();
+ assert.equal(inv.format,'zesia.consult.inventory.v1');
+ assert.equal(inv.count,4);
+
+ const dry=await f.runtime.clean({all:true});
+ assert.equal(dry.dryRun,true);
+ assert.equal(dry.summary.deleted,1);
+ assert.equal(dry.summary.redacted,1);
+ assert.equal(dry.summary.protected,2); // unknown + unsafe symlink
+
+ // Dry-run left files untouched
+ const beforeClean=await readFile(join(f.stateDir,doneDraft.draftId+'.json'),'utf8');
+ assert.ok(beforeClean.includes('SECRET_DONE_BRIEF'));
+
+ const applied=await f.runtime.clean({apply:true,all:true});
+ assert.equal(applied.dryRun,false);
+ assert.equal(applied.summary.deleted,1);
+ assert.equal(applied.summary.redacted,1);
+ assert.equal(applied.summary.protected,2);
+
+ // Terminal record is scrubbed, canary gone, but .send claim + tombstone remain (anti-replay)
+ const afterClean=await readFile(join(f.stateDir,doneDraft.draftId+'.json'),'utf8');
+ assert.equal(afterClean.includes('SECRET_DONE_BRIEF'),false);
+ assert.equal(afterClean.includes('SECRET_ADVICE_BODY'),false);
+ const replayRes=await f.runtime.send(doneDraft.draftId,doneDraft.approvedHash,'Send.');
+ assert.equal(replayRes.status,'completed');
+ assert.equal(calls,2); // no extra call
+
+ // Unknown record, non-ZESIA file, and symlink target all preserved
+ assert.equal((await readFile(join(f.stateDir,'notes.txt'),'utf8')),'keep-me');
+ assert.equal((await readFile(targetOutside,'utf8')),'do-not-delete');
+ const invAfter=await f.runtime.list();
+ assert.ok(invAfter.records.some(r=>r.draftId===unkDraft.draftId&&r.status==='unknown'&&r.protected));
+ assert.equal(invAfter.records.some(r=>r.draftId===expDraft.draftId),false);
 });
