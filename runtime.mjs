@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, rename, writeFile, unlink, link } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, rename, writeFile, unlink, link, lstat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { validatePacket } from './runtime/workflow.mjs';
@@ -260,5 +260,108 @@ export function createPortable({
       try { return await stage(packet, { contextId: r.a2a.contextId, round: round+1 }); }
       catch (error) { await unlink(path(id)+'.followup'); throw error; }
     },
+    async list({ retentionDays = 7 } = {}) {
+      const items = await inspectRecords({ retentionDays, all: false });
+      return { ok: true, format: 'zesia.consult.inventory.v1', retentionDaysDefault: retentionDays, count: items.length, records: items };
+    },
+    async clean({ apply = false, retentionDays = 7, all = false } = {}) {
+      if (!Number.isFinite(retentionDays) || retentionDays < 0) throw new Error('retentionDays must be a non-negative number.');
+      const items = await inspectRecords({ retentionDays, all });
+      let deleted = 0, redacted = 0, protectedCount = 0, alreadyRedacted = 0;
+      for (const item of items) {
+        if (item.action === 'delete') {
+          if (apply) {
+            await unlink(path(item.draftId)).catch(err => { if (err.code !== 'ENOENT') throw err; });
+            await unlink(path(item.draftId) + '.received').catch(err => { if (err.code !== 'ENOENT') throw err; });
+          }
+          deleted++;
+        } else if (item.action === 'redact') {
+          if (apply) {
+            const raw = JSON.parse(await readFile(path(item.draftId), 'utf8'));
+            await store({
+              id: raw.id,
+              requestId: raw.requestId || null,
+              status: raw.status,
+              destination: raw.destination || null,
+              expiresAt: raw.expiresAt || null,
+              redactedAt: now(),
+            });
+          }
+          redacted++;
+        } else if (item.action === 'already_redacted') {
+          alreadyRedacted++;
+        } else {
+          protectedCount++;
+        }
+      }
+      return {
+        ok: true,
+        format: 'zesia.consult.clean.v1',
+        dryRun: !apply,
+        retentionDays,
+        summary: { total: items.length, deleted, redacted, protected: protectedCount, alreadyRedacted },
+        items,
+      };
+    },
   };
+
+  async function inspectRecords({ retentionDays = 7, all = false } = {}) {
+    let dirStat;
+    try { dirStat = await lstat(stateDir); } catch (err) { if (err.code === 'ENOENT') return []; throw err; }
+    if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) throw new Error('State directory must be a regular directory.');
+    const entries = await readdir(stateDir);
+    const records = [];
+    for (const entry of entries.sort()) {
+      const m = /^([0-9a-f-]{36})\.json$/.exec(entry);
+      if (!m) continue;
+      const draftId = m[1];
+      const filePath = path(draftId);
+      const st = await lstat(filePath).catch(() => null);
+      if (!st || st.isSymbolicLink() || !st.isFile() || st.nlink > 1) {
+        records.push({ draftId, requestId: null, status: 'unsafe', expired: false, protected: true, protectedReason: 'unsafe_link', hasMaterials: false, bytes: st?.size || 0, action: 'skip' });
+        continue;
+      }
+      let raw;
+      try { raw = JSON.parse(await readFile(filePath, 'utf8')); } catch {
+        records.push({ draftId, requestId: null, status: 'corrupt', expired: false, protected: true, protectedReason: 'unreadable_record', hasMaterials: false, bytes: st.size, action: 'skip' });
+        continue;
+      }
+      const hasSendClaim = Boolean(await lstat(filePath + '.send').catch(() => null));
+      const expired = typeof raw.expiresAt === 'number' && now() > raw.expiresAt;
+      const createdApprox = typeof raw.expiresAt === 'number' ? raw.expiresAt - 15 * 60 * 1000 : (raw.approval?.at || st.mtimeMs);
+      const ageMs = Math.max(0, now() - createdApprox);
+      const hasMaterials = Boolean(raw.packet || raw.rawResult || raw.result);
+      let isProtected = false, protectedReason = null, action = 'skip';
+      if (raw.status === 'unknown') {
+        isProtected = true; protectedReason = 'unknown_outcome';
+      } else if (hasSendClaim && raw.status === 'prepared') {
+        isProtected = true; protectedReason = 'active_send_claim';
+      } else if (raw.status === 'prepared' && !hasSendClaim) {
+        if (expired || all) { action = 'delete'; }
+        else { isProtected = true; protectedReason = 'active_draft'; }
+      } else if (['completed', 'failed', 'cancelled'].includes(raw.status)) {
+        if (raw.redactedAt && !hasMaterials) {
+          action = 'already_redacted';
+        } else if (all || ageMs >= retentionDays * 86400_000) {
+          action = 'redact';
+        } else {
+          isProtected = true; protectedReason = 'within_retention_window';
+        }
+      } else {
+        isProtected = true; protectedReason = 'unrecognized_status';
+      }
+      records.push({
+        draftId,
+        requestId: raw.requestId || null,
+        status: raw.status,
+        expired,
+        protected: isProtected,
+        protectedReason,
+        hasMaterials,
+        bytes: st.size,
+        action,
+      });
+    }
+    return records;
+  }
 }
