@@ -3,7 +3,7 @@ import { mkdir, open, readFile, rename, writeFile, unlink, link } from 'node:fs/
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { validatePacket } from './runtime/workflow.mjs';
-import { readConfig, destinationOf } from './runtime/config.mjs';
+import { readConfig, saveConfig, destinationOf } from './runtime/config.mjs';
 import { consultOverA2A, recoverConsult } from './runtime/a2a.mjs';
 
 export function portableEnvironment(env = process.env) {
@@ -23,6 +23,7 @@ function check(packet) {
 export function createPortable({
   stateDir = process.env.ZESIA_STATE_DIR || join(homedir(), '.local/state/zesia/consult'),
   configuration = () => readConfig(portableEnvironment(), { requireToken: false }),
+  saveConfiguration = values => saveConfig(values, portableEnvironment()),
   consult = consultOverA2A, recover = recoverConsult, now = Date.now,
 } = {}) {
   const path = id => {
@@ -137,11 +138,20 @@ export function createPortable({
         await store(record); return present(record);
       }
     },
+    async configure({ destination, token }) {
+      if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{32,256}$/u.test(token)) throw new Error('Invalid activation token.');
+      const url = destinationOf(destination);
+      if (process.env.ZESIA_URL && destinationOf(process.env.ZESIA_URL) !== url) throw new Error('The configured destination does not match ZESIA_URL.');
+      await saveConfiguration({ url, token });
+      return { ok: true, configured: true, destination: url };
+    },
     async inspect(id, { compact = false } = {}) {
       const record = await read(id);
-      if(compact)return {status:record.status,agentReceivedAt:await receivedAt(id),
+      const config = await configuration().catch(() => null);
+      const configured = Boolean(config?.token);
+      if(compact)return {status:record.status,configured,agentReceivedAt:await receivedAt(id),
         ...(record.result?.ok===false?{result:{message:record.result.message}}:{})};
-      return {ok:true,draftId:record.id,requestId:record.requestId,status:record.status,approvedHash:record.hash,
+      return {ok:true,draftId:record.id,requestId:record.requestId,status:record.status,configured,approvedHash:record.hash,
         destination:record.destination,packet:structuredClone(record.packet),
         expiresAt:new Date(record.expiresAt).toISOString(),result:record.result || null,rawResult:record.rawResult||null,agentReceivedAt:await receivedAt(id)};
     },

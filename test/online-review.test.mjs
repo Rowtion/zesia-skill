@@ -79,3 +79,37 @@ test('lost response recovers from cloud by the same request ID without another i
   await runtime.send(prepared.draftId,prepared.approvedHash,'User approved.');assert.equal(calls,1);
  }finally{await rm(directory,{recursive:true,force:true});}
 });
+
+test('bridge configure saves activation token locally and flips configured from false to true',async()=>{
+ const directory=await mkdtemp(join(tmpdir(),'zesia-online-cfg-'));
+ let config={url:'https://api.zesia.dev',token:''};
+ const runtime=createPortable({
+  stateDir:directory,
+  configuration:async()=>config,
+  saveConfiguration:async values=>{config={url:values.url,token:values.token};return join(directory,'agent.json');},
+ });
+ const prepared=await runtime.prepare(packet);
+ const session=await startOnlineReview({runtime,draftId:prepared.draftId});
+ const params=new URLSearchParams(new URL(session.url).hash.slice(1));
+ const origin='http://127.0.0.1:'+params.get('port');
+ const headers={origin:'https://zesia.dev',authorization:'Bearer '+params.get('key'),'content-type':'application/json'};
+ try{
+  const before=await(await fetch(origin+'/bridge/v1/view',{headers})).json();
+  assert.equal(before.configured,false);
+  assert.equal(JSON.stringify(before).includes('secret'),false);
+
+  const badToken=await fetch(origin+'/bridge/v1/configure',{method:'POST',headers,body:JSON.stringify({protocolVersion:1,destination:'https://api.zesia.dev',token:'short'})});
+  assert.equal(badToken.status,400);
+
+  const validToken='A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v';
+  const res=await fetch(origin+'/bridge/v1/configure',{method:'POST',headers,body:JSON.stringify({protocolVersion:1,destination:'https://api.zesia.dev',token:validToken})});
+  assert.equal(res.status,200);
+  const after=await res.json();
+  assert.equal(after.configured,true);
+  assert.equal(config.token,validToken);
+  assert.equal(JSON.stringify(after).includes(validToken),false);
+ }finally{
+  session.close();
+  await rm(directory,{recursive:true,force:true});
+ }
+});
