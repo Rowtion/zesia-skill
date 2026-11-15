@@ -4,6 +4,7 @@ import { mkdtemp, readFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createPortable } from './runtime.mjs';
+import { ackConsult } from './runtime/a2a.mjs';
 const packet={requester:'Codex',project:'synthetic-review',brief:'Review the artifact publication order.',context:{goal:'Avoid a losing worker overwriting the winner.',materials:[{id:'code',content:'publish(); claimWinner();'}]}};
 async function fixture(options={}){
  const stateDir=await mkdtemp(join(tmpdir(),'zesia-portable-test-'));let calls=0,preflights=0;
@@ -28,4 +29,47 @@ test('unknown delivery remains unknown across restarts and cannot be automatical
 });
 test('preflight rejection makes zero paid requests and is returned with its usable details',async()=>{
  const f=await fixture({consult:async()=>{throw Object.assign(Error('Use a narrower question.'),{outcome:'not_started',details:{limit:100,used:150}})}}),d=await f.runtime.prepare(packet);const r=await f.runtime.send(d.draftId,d.approvedHash,'Send.');assert.equal(r.outcome,'not_started');assert.equal(r.details.limit,100);assert.equal(f.counts().calls,0);
+});
+test('result markReceived sends best-effort ack once and diagnose excludes canary content',async()=>{
+ const acks=[];let seenCorrelation=null;
+ const f=await fixture({
+  consult:async args=>{seenCorrelation=args.correlation;return{format:'zesia.consult.v0',consultId:'c-diag',advice:'CANARY_ADVICE_SECRET',decision:{assessment:'CANARY_ADVICE_SECRET',recommendation:'CANARY_REC'},a2a:{contextId:'ctx-1'},qualityStatus:'complete_structure'};},
+  ack:async args=>{acks.push(args);throw new Error('offline ack failure must not break result');},
+ });
+ const canaryPacket={requester:'Codex',project:'canary-proj',brief:'CANARY_BRIEF_TEXT',context:{goal:'CANARY_GOAL_TEXT',materials:[{id:'m1',content:'CANARY_MATERIAL_TEXT'}]}};
+ const d=await f.runtime.prepare(canaryPacket);
+ await f.runtime.send(d.draftId,d.approvedHash,'Send.');
+ assert.equal(seenCorrelation?.requester,'Codex');
+ const first=await f.runtime.result(d.draftId,{markReceived:true});
+ assert.equal(first.status,'completed');
+ assert.equal(acks.length,1);
+ assert.equal(acks[0].requestId,d.requestId);
+ await f.runtime.result(d.draftId,{markReceived:true});
+ assert.equal(acks.length,1);
+ const diag=await f.runtime.diagnose(d.draftId);
+ assert.equal(diag.format,'zesia.consult.diagnostic.v1');
+ assert.equal(diag.requestId,d.requestId);
+ assert.equal(diag.draftId,d.draftId);
+ assert.equal(diag.requester,'Codex');
+ assert.equal(diag.status,'completed');
+ assert.ok(diag.agentReceivedAt);
+ const serialized=JSON.stringify(diag);
+ for(const canary of ['CANARY_BRIEF_TEXT','CANARY_GOAL_TEXT','CANARY_MATERIAL_TEXT','CANARY_ADVICE_SECRET','CANARY_REC','synthetic-test-only']){
+  assert.equal(serialized.includes(canary),false);
+ }
+});
+test('ackConsult posts to /v1/consult/requests/:id/ack and rejects malformed ids safely',async()=>{
+ const seen=[];
+ assert.equal(await ackConsult({url:'https://api.zesia.dev',token:'synthetic-token-value-12345678901234',requestId:'bad-id'}),false);
+ assert.equal(await ackConsult({url:'https://api.zesia.dev',token:'bad token',requestId:'zrq-1700000000000-00000000-0000-0000-0000-000000000000'}),false);
+ const ok=await ackConsult({
+  url:'https://api.zesia.dev',
+  token:'synthetic-token-value-12345678901234',
+  requestId:'zrq-1700000000000-00000000-0000-0000-0000-000000000000',
+  fetch:async(url,init)=>{seen.push({url,init});return new Response(JSON.stringify({ok:true}),{status:200});},
+ });
+ assert.equal(ok,true);
+ assert.equal(seen[0].url,'https://api.zesia.dev/v1/consult/requests/zrq-1700000000000-00000000-0000-0000-0000-000000000000/ack');
+ assert.equal(seen[0].init.method,'POST');
+ assert.equal(seen[0].init.headers.authorization,'Bearer synthetic-token-value-12345678901234');
 });
