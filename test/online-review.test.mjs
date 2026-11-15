@@ -102,12 +102,60 @@ test('bridge configure saves activation token locally and flips configured from 
   assert.equal(badToken.status,400);
 
   const validToken='A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v';
+  const wrongDest=await fetch(origin+'/bridge/v1/configure',{method:'POST',headers,body:JSON.stringify({protocolVersion:1,destination:'https://zesia-consult-staging.cprindex.workers.dev',token:validToken})});
+  assert.equal(wrongDest.status,409);
+  assert.equal(config.token,'');
+
   const res=await fetch(origin+'/bridge/v1/configure',{method:'POST',headers,body:JSON.stringify({protocolVersion:1,destination:'https://api.zesia.dev',token:validToken})});
   assert.equal(res.status,200);
   const after=await res.json();
   assert.equal(after.configured,true);
   assert.equal(config.token,validToken);
   assert.equal(JSON.stringify(after).includes(validToken),false);
+ }finally{
+  session.close();
+  await rm(directory,{recursive:true,force:true});
+ }
+});
+
+test('401 unauthorized sets reauthRequired and configure resets draft for re-send',async()=>{
+ const directory=await mkdtemp(join(tmpdir(),'zesia-online-reauth-'));
+ let config={url:'https://api.zesia.dev',token:'expired-or-revoked-token-1234567890123456'};
+ const freshToken='N1ewT2oken3For4Reauth5Flow6Testing789012345';
+ const runtime=createPortable({
+  stateDir:directory,
+  configuration:async()=>config,
+  saveConfiguration:async values=>{config={url:values.url,token:values.token};return join(directory,'agent.json');},
+  consult:async args=>{
+   if(args.token!==freshToken)throw Object.assign(new Error('This credential is invalid, expired or revoked.'),{code:'unauthorized',status:401,outcome:'not_started'});
+   return {format:'zesia.consult.v0',requestId:args.requestId,consultId:'reauth-ok',advice:'Succeeded after re-auth',qualityStatus:'complete_structure',deliveryKind:'opinion',a2a:{contextId:'reauth-ctx'}};
+  },
+ });
+ const prepared=await runtime.prepare(packet);
+ const session=await startOnlineReview({runtime,draftId:prepared.draftId});
+ const params=new URLSearchParams(new URL(session.url).hash.slice(1));
+ const origin='http://127.0.0.1:'+params.get('port');
+ const headers={origin:'https://zesia.dev',authorization:'Bearer '+params.get('key'),'content-type':'application/json'};
+ const approval={draftId:prepared.draftId,requestId:prepared.requestId,approvedHash:prepared.approvedHash,destination:prepared.destination,protocolVersion:1};
+ try{
+  await fetch(origin+'/bridge/v1/approve',{method:'POST',headers,body:JSON.stringify(approval)});
+  let view;
+  for(let i=0;i<30;i++){view=await(await fetch(origin+'/bridge/v1/status',{headers})).json();if(view.status==='failed')break;await new Promise(r=>setTimeout(r,5));}
+  assert.equal(view.status,'failed');
+  assert.equal(view.reauthRequired,true);
+
+  const reconfigured=await fetch(origin+'/bridge/v1/configure',{method:'POST',headers,body:JSON.stringify({protocolVersion:1,destination:'https://api.zesia.dev',token:freshToken})});
+  assert.equal(reconfigured.status,200);
+  const ready=await reconfigured.json();
+  assert.equal(ready.status,'prepared');
+  assert.equal(ready.reauthRequired,false);
+
+  const resend=await fetch(origin+'/bridge/v1/approve',{method:'POST',headers,body:JSON.stringify(approval)});
+  assert.equal(resend.status,202);
+  let done;
+  for(let i=0;i<30;i++){done=await(await fetch(origin+'/bridge/v1/status',{headers})).json();if(done.status==='completed')break;await new Promise(r=>setTimeout(r,5));}
+  assert.equal(done.status,'completed');
+  assert.equal(done.rawResult.consultId,'reauth-ok');
  }finally{
   session.close();
   await rm(directory,{recursive:true,force:true});
