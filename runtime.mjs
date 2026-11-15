@@ -4,7 +4,8 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { validatePacket } from './runtime/workflow.mjs';
 import { readConfig, saveConfig, destinationOf } from './runtime/config.mjs';
-import { consultOverA2A, recoverConsult } from './runtime/a2a.mjs';
+import { consultOverA2A, recoverConsult, ackConsult } from './runtime/a2a.mjs';
+import { runtimeVersion } from './runtime/standalone.mjs';
 
 export function portableEnvironment(env = process.env) {
   return { ...env, ZESIA_CONFIG: env.ZESIA_CONFIG || join(homedir(), '.config/zesia/agent.json') };
@@ -24,7 +25,7 @@ export function createPortable({
   stateDir = process.env.ZESIA_STATE_DIR || join(homedir(), '.local/state/zesia/consult'),
   configuration = () => readConfig(portableEnvironment(), { requireToken: false }),
   saveConfiguration = values => saveConfig(values, portableEnvironment()),
-  consult = consultOverA2A, recover = recoverConsult, now = Date.now,
+  consult = consultOverA2A, recover = recoverConsult, ack = ackConsult, now = Date.now,
 } = {}) {
   const path = id => {
     if (!/^[0-9a-f-]{36}$/.test(id || '')) throw new Error('Invalid draft ID.');
@@ -125,7 +126,9 @@ export function createPortable({
         record.approval={hash:record.hash,requestId:record.requestId,destination:record.destination,confirmation:confirmation.trim(),at:now()};
         record.status = 'unknown'; await store(record);
         const response = await consult({ url: config.url, token: config.token, input: record.packet,
-          contextId: record.continuation?.contextId, requestId: record.requestId, signal: AbortSignal.timeout(60000) });
+          contextId: record.continuation?.contextId, requestId: record.requestId,
+          correlation: { requester: record.packet?.requester, hostVersion: record.packet?.hostVersion, runtimeVersion: runtimeVersion || undefined, parentRequestId: record.continuation?.previousRequestId || undefined },
+          signal: AbortSignal.timeout(60000) });
         // Keep the full result locally. Return work-relevant fields once, without
         // echoing the submitted packet, routing probabilities or provider traces.
         return await acceptResponse(record,response);
@@ -199,9 +202,37 @@ export function createPortable({
       const recovered=await recoverResult(id).catch(()=>null);
       const record=await read(id);
       if(markReceived&&record.status==='completed'){
-        try{await writeFile(path(id)+'.received',JSON.stringify({at:now()}),{flag:'wx',mode:0o600});}catch(error){if(error.code!=='EEXIST')throw error;}
+        let firstReceipt=false;
+        try{await writeFile(path(id)+'.received',JSON.stringify({at:now()}),{flag:'wx',mode:0o600});firstReceipt=true;}catch(error){if(error.code!=='EEXIST')throw error;}
+        if(firstReceipt&&record.requestId){
+          const config=await configuration().catch(()=>null);
+          if(config?.url&&config?.token)await ack({url:config.url,token:config.token,requestId:record.requestId,signal:AbortSignal.timeout(5000)}).catch(()=>false);
+        }
       }
       return {...(record.status!=='completed'&&recovered?.pending?recovered:present(record,true)),agentReceivedAt:await receivedAt(id)};
+    },
+    async diagnose(id) {
+      const record = await read(id);
+      return {
+        ok: true,
+        format: 'zesia.consult.diagnostic.v1',
+        draftId: record.id,
+        requestId: record.requestId || null,
+        consultId: record.rawResult?.consultId || record.result?.consultId || null,
+        contextId: record.rawResult?.a2a?.contextId || record.continuation?.contextId || null,
+        destination: record.destination || null,
+        requester: record.packet?.requester || null,
+        status: record.status,
+        outcome: record.result?.outcome || (record.status === 'completed' ? 'completed' : null),
+        code: record.result?.code || null,
+        stage: record.result?.stage || null,
+        round: record.continuation?.round || 1,
+        reauthRequired: Boolean(record.reauthRequired),
+        createdAt: record.createdAt || null,
+        approvedAt: record.approval?.at || null,
+        completedAt: record.completedAt || null,
+        agentReceivedAt: await receivedAt(id),
+      };
     },
     async followup(id, answers) {
       const parent = await read(id), r = parent.rawResult;

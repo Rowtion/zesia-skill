@@ -15,6 +15,7 @@ try {
   if(command==='prepare')value=await runtime.prepare(JSON.parse(await readFile(id,'utf8')));
   else if(command==='send')value=await runtime.send(id,hash,await readFile(confirmationFile,'utf8'));
   else if(command==='result')value=await runtime.result(id,{markReceived:true});
+  else if(command==='diagnose')value=await runtime.diagnose(id);
   else if(command==='followup')value=await runtime.followup(id,JSON.parse(await readFile(hash,'utf8')));
   else if(command==='review'){
     if(hash && hash!=='--no-open')throw Error('Use review <draftId> [--no-open].');
@@ -55,7 +56,7 @@ try {
     while(true){value=await runtime.result(id,{markReceived:true});if(value.status==='completed'||value.code==='cancelled'||(!value.pending&&(value.retryAllowed===false||value.outcome))||Date.now()>=until)break;await pause(500);}
     if(value.code==='result_unavailable')value={ok:true,status:value.status,draftId:id,pending:true,hint:'The local result is not ready. Use result later; do not send or prepare a duplicate.'};
   }
-  else if(command==='--help')value={commands:['configure [--token-file <file>]','install <project> [--upgrade]','prepare <packet.json>','review <draftId> [--no-open]','wait <draftId> [seconds:1-900]','result <draftId>','followup <draftId> <answers.json>','send <draftId> <approvedHash> <confirmation.txt> (legacy explicit-confirmation interface)'],note:'Preparation is local. Use review for the shared zesia.dev window. Only its approval sends materials. Use the standalone executable when Node is unavailable; no administrator access.'};
+  else if(command==='--help')value={commands:['configure [--token-file <file>]','install <project> [--upgrade]','prepare <packet.json>','review <draftId> [--no-open]','wait <draftId> [seconds:1-900]','result <draftId>','diagnose <draftId>','followup <draftId> <answers.json>','send <draftId> <approvedHash> <confirmation.txt> (legacy explicit-confirmation interface)'],note:'Preparation is local. Use review for the shared zesia.dev window. Only its approval sends materials. Use the standalone executable when Node is unavailable; no administrator access.'};
   else throw Error('Unknown command. Run with --help.');
   if(['prepare','followup'].includes(command)&&value){delete value.packet;value.hint='Materials are prepared locally. Open review, then wait for the result. Do not paste or send the packet from chat.';}
   if(value!==undefined&&!['serve-review','serve-online-review'].includes(command))console.log(JSON.stringify(value,null,2));
