@@ -139,7 +139,11 @@ export function createPortable({
           stage: error.details?.stage || 'consultation', outcome: record.status === 'failed' ? 'not_started' : 'unknown', retryAllowed: false,
           ...(reauthRequired ? { reauthRequired: true } : {}),
           ...(error.details ? { details: error.details } : {}) };
-        await store(record); return present(record);
+        await store(record);
+        if (reauthRequired) {
+          await unlink(path(id) + '.send').catch(err => { if (err.code !== 'ENOENT') throw err; });
+        }
+        return present(record);
       }
     },
     async configure({ destination, token, draftId }) {
@@ -148,13 +152,25 @@ export function createPortable({
       if (process.env.ZESIA_URL && destinationOf(process.env.ZESIA_URL) !== url) throw new Error('The configured destination does not match ZESIA_URL.');
       await saveConfiguration({ url, token });
       if (draftId) {
-        const record = await read(draftId);
-        if (record.status === 'failed' && record.reauthRequired && now() <= record.expiresAt) {
-          await unlink(path(draftId) + '.send').catch(error => { if (error.code !== 'ENOENT') throw error; });
-          record.status = 'prepared';
-          delete record.reauthRequired;
-          delete record.result;
-          await store(record);
+        let claim = null;
+        try {
+          claim = await open(path(draftId) + '.send', 'wx', 0o600);
+        } catch (error) {
+          if (error.code !== 'EEXIST') throw error;
+        }
+        if (claim) {
+          try {
+            const record = await read(draftId);
+            if (record.status === 'failed' && record.reauthRequired && now() <= record.expiresAt) {
+              record.status = 'prepared';
+              delete record.reauthRequired;
+              delete record.result;
+              await store(record);
+            }
+          } finally {
+            await claim.close();
+            await unlink(path(draftId) + '.send').catch(err => { if (err.code !== 'ENOENT') throw err; });
+          }
         }
       }
       return { ok: true, configured: true, destination: url };

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import {request as httpRequest} from 'node:http';
 import assert from 'node:assert/strict';
-import {mkdtemp,rm,readFile} from 'node:fs/promises';
+import {mkdtemp,rm,readFile,access} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createPortable} from '../runtime.mjs';
@@ -158,6 +158,60 @@ test('401 unauthorized sets reauthRequired and configure resets draft for re-sen
   assert.equal(done.rawResult.consultId,'reauth-ok');
  }finally{
   session.close();
+  await rm(directory,{recursive:true,force:true});
+ }
+});
+
+test('concurrent configure across runtime instances cannot delete active send claim or reset unknown state',async()=>{
+ const directory=await mkdtemp(join(tmpdir(),'zesia-online-concurrent-reauth-'));
+ let config={url:'https://api.zesia.dev',token:'expired-token-1234567890123456789012345'};
+ const freshToken='F1resh2Token3For4Concurrency5Test6789012345';
+ let calls=0,release,startedResolve;
+ const pending=new Promise(r=>{release=r;});
+ const started=new Promise(r=>{startedResolve=r;});
+ const runtimeFast=createPortable({
+  stateDir:directory,
+  configuration:async()=>config,
+  saveConfiguration:async values=>{config={url:values.url,token:values.token};return join(directory,'agent.json');},
+  consult:async args=>{
+   if(args.token!==freshToken)throw Object.assign(new Error('This credential is invalid, expired or revoked.'),{code:'unauthorized',status:401,outcome:'not_started'});
+   calls++;startedResolve();await pending;
+   return {format:'zesia.consult.v0',requestId:args.requestId,consultId:'one-send-only',advice:'Ok',qualityStatus:'complete_structure',deliveryKind:'opinion',a2a:{contextId:'ctx'}};
+  },
+ });
+ const runtimeSlow=createPortable({
+  stateDir:directory,
+  configuration:async()=>config,
+  saveConfiguration:async values=>{await new Promise(r=>setTimeout(r,40));config={url:values.url,token:values.token};return join(directory,'agent.json');},
+ });
+ let sendPromise;
+ try{
+  const prepared=await runtimeFast.prepare(packet);
+  const failed=await runtimeFast.send(prepared.draftId,prepared.approvedHash,'Approved');
+  assert.equal(failed.code,'unauthorized');
+  assert.equal(failed.reauthRequired,true);
+  assert.equal((await runtimeFast.inspect(prepared.draftId)).status,'failed');
+
+  const slowConfigure=runtimeSlow.configure({destination:'https://api.zesia.dev',token:freshToken,draftId:prepared.draftId});
+  await runtimeFast.configure({destination:'https://api.zesia.dev',token:freshToken,draftId:prepared.draftId});
+  sendPromise=runtimeFast.send(prepared.draftId,prepared.approvedHash,'Approved');
+  await started;
+  await slowConfigure;
+
+  const during=await runtimeFast.inspect(prepared.draftId);
+  assert.equal(during.status,'unknown');
+  await access(join(directory,prepared.draftId+'.json.send'));
+  const dup=await runtimeFast.send(prepared.draftId,prepared.approvedHash,'Approved');
+  assert.equal(dup.code,'outcome_unknown');
+  assert.equal(calls,1);
+
+  release();
+  const done=await sendPromise;
+  assert.equal(done.status,'completed');
+  assert.equal(calls,1);
+ }finally{
+  release?.();
+  await sendPromise?.catch(()=>{});
   await rm(directory,{recursive:true,force:true});
  }
 });
