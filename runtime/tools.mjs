@@ -4,8 +4,8 @@ export const ADOPTION_INSTRUCTIONS = 'After successful advice, assess every reco
 
 const evidenceFilesSchema = {
   type: 'array',
-  maxItems: 3,
-  description: 'Top-level argument, never inside context. Original project file excerpts copied by the plugin; at most 200 lines and 6000 characters each. Do not duplicate attached excerpts in context.materials. Never include credentials.',
+  maxItems: 16,
+  description: 'Top-level argument, never inside context. Original project text/code excerpts copied by the plugin; excerpts over 12,000 characters are automatically split into multiple chunks. Do not duplicate attached excerpts in context.materials. Never include credentials.',
   items: {
     type: 'object',
     additionalProperties: false,
@@ -14,6 +14,21 @@ const evidenceFilesSchema = {
       path: { type: 'string', description: 'Project-relative path.' },
       startLine: { type: 'integer', minimum: 1 },
       endLine: { type: 'integer', minimum: 1 },
+    },
+  },
+};
+
+const attachmentFilesSchema = {
+  type: 'array',
+  maxItems: 10,
+  description: 'Top-level argument, never inside context. Project-relative image or document files (png, jpg, webp, gif, pdf, txt, md, json) up to 6 MiB total, ideal for UI screenshots.',
+  items: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['path'],
+    properties: {
+      path: { type: 'string', description: 'Project-relative path to an image or document.' },
+      mediaType: { type: 'string', enum: ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'application/pdf', 'text/plain', 'text/markdown', 'application/json'] },
     },
   },
 };
@@ -69,13 +84,29 @@ const contextSchema = {
     },
     materials: {
       type: 'array',
-      maxItems: 8,
-      description: 'Evidence contents, at most 6000 characters each. A URL alone is not evidence.',
+      maxItems: 16,
+      description: 'Evidence contents, at most 12000 characters each. A URL alone is not evidence.',
       items: {
         type: 'object',
         additionalProperties: false,
         required: ['id', 'content'],
-        properties: { id: { type: 'string', maxLength: 100 }, content: { type: 'string', maxLength: 6000 } },
+        properties: { id: { type: 'string', maxLength: 100 }, content: { type: 'string', maxLength: 12000 } },
+      },
+    },
+    attachments: {
+      type: 'array',
+      maxItems: 10,
+      description: 'Optional image or document attachments (png, jpg, webp, gif, pdf, txt, md, json), up to 6 MiB total.',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'mediaType', 'data'],
+        properties: {
+          id: { type: 'string', maxLength: 100 },
+          filename: { type: 'string', maxLength: 200 },
+          mediaType: { type: 'string', enum: ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'application/pdf', 'text/plain', 'text/markdown', 'application/json'] },
+          data: { type: 'string', maxLength: 6 * 1024 * 1024 },
+        },
       },
     },
     previousAdvice: { type: 'array', maxItems: 12, items: { type: 'string', maxLength: 128 * 1024 }, description: 'Complete previous expert advice; the combined request still must fit the server input budget.' },
@@ -148,6 +179,7 @@ export function createTools(options = {}) {
           project: { type: 'string', maxLength: 160, description: 'The user project name, not the agent name.' },
           context: contextSchema,
           evidenceFiles: evidenceFilesSchema,
+          attachmentFiles: attachmentFilesSchema,
         },
       },
       async handler(args) {
@@ -219,6 +251,7 @@ export function createTools(options = {}) {
             },
           },
           evidenceFiles: evidenceFilesSchema,
+          attachmentFiles: attachmentFilesSchema,
         },
       },
       async handler(args) {

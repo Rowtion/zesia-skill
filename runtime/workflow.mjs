@@ -2,18 +2,31 @@ import { createHash, randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
 import { consultOverA2A, preflightConsult } from './a2a.mjs';
 import { destinationOf, readConfig, REQUESTER } from './config.mjs';
-import { captureEvidence, mergeEvidence, projectRoot, scanPacket } from './evidence.mjs';
+import {
+  ALLOWED_ATTACHMENT_TYPES,
+  attachmentPayload,
+  captureAttachments,
+  captureEvidence,
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENTS,
+  MAX_MATERIAL_CHARS,
+  MAX_MATERIALS,
+  mergeAttachments,
+  mergeEvidence,
+  projectRoot,
+  scanPacket,
+} from './evidence.mjs';
 
 const DRAFT_TTL = 15 * 60 * 1000;
 const CONSULT_TTL = 60 * 60 * 1000;
 const MAX_ROUNDS = 3;
 const MAX_RECORDS = 20;
-const MAX_MATERIALS = 8;
 const MAX_PREVIOUS_ADVICE = 12;
+const ALLOWED_MEDIA_TYPES = new Set(ALLOWED_ATTACHMENT_TYPES.values());
 const PACKET_KEYS = new Set(['requester', 'project', 'brief', 'context']);
 const CONTEXT_KEYS = new Set([
   'goal', 'originalReply', 'facts', 'assumptions', 'attempts', 'userFeedback',
-  'constraints', 'statements', 'materials', 'previousAdvice', 'continuation',
+  'constraints', 'statements', 'materials', 'attachments', 'previousAdvice', 'continuation',
 ]);
 
 function stableStringify(value) {
@@ -91,7 +104,19 @@ function validateContext(context) {
   }
   for (const item of boundedArray(context.materials, 'context.materials', MAX_MATERIALS)) {
     boundedString(item?.id, 'context.materials[].id', 100);
-    boundedString(item?.content, 'context.materials[].content', 6000);
+    boundedString(item?.content, 'context.materials[].content', MAX_MATERIAL_CHARS);
+  }
+  let totalAttachmentBytes = 0;
+  for (const item of boundedArray(context.attachments, 'context.attachments', MAX_ATTACHMENTS)) {
+    boundedString(item?.id, 'context.attachments[].id', 100);
+    if (item?.filename !== undefined) boundedString(item.filename, 'context.attachments[].filename', 200);
+    if (!ALLOWED_MEDIA_TYPES.has(item?.mediaType)) throw new Error('context.attachments[].mediaType is not supported.');
+    boundedString(item?.data, 'context.attachments[].data', MAX_ATTACHMENT_BYTES);
+    if (!attachmentPayload(item).valid) throw new Error('context.attachments[].data must be valid base64 or a matching base64 data URL.');
+    totalAttachmentBytes += Buffer.byteLength(item.data, 'utf8');
+  }
+  if (totalAttachmentBytes > MAX_ATTACHMENT_BYTES) {
+    throw new Error(`context.attachments total size exceeds ${Math.round(MAX_ATTACHMENT_BYTES / (1024 * 1024))} MiB.`);
   }
   for (const item of boundedArray(context.previousAdvice, 'context.previousAdvice', MAX_PREVIOUS_ADVICE)) {
     // Preserve complete validated advice; server preflight applies the overall
@@ -297,7 +322,10 @@ export function createWorkflow({
       if (context.continuation) return failure('use_followup', 'Use zesia_followup for an existing consultation.');
       const captured = await captureEvidence(args.evidenceFiles, { root });
       if (captured.length) context.materials = mergeEvidence(context.materials || [], captured);
-      if ((context.materials || []).length > MAX_MATERIALS) throw new Error('At most eight evidence materials are supported.');
+      if ((context.materials || []).length > MAX_MATERIALS) throw new Error(`At most ${MAX_MATERIALS} evidence materials are supported.`);
+      const capturedAtts = await captureAttachments(args.attachmentFiles, { root });
+      if (capturedAtts.length) context.attachments = mergeAttachments(context.attachments || [], capturedAtts);
+      if ((context.attachments || []).length > MAX_ATTACHMENTS) throw new Error(`At most ${MAX_ATTACHMENTS} attachments are supported.`);
       const packet = {
         requester,
         project: config.project || args.project || basename(root),
@@ -391,7 +419,10 @@ export function createWorkflow({
       }
       const captured = await captureEvidence(args.evidenceFiles, { root });
       if (captured.length) packet.context.materials = mergeEvidence(packet.context.materials, captured);
-      if (packet.context.materials.length > MAX_MATERIALS) throw new Error('At most eight evidence materials are supported. Nothing sent.');
+      if (packet.context.materials.length > MAX_MATERIALS) throw new Error(`At most ${MAX_MATERIALS} evidence materials are supported. Nothing sent.`);
+      const capturedAtts = await captureAttachments(args.attachmentFiles, { root });
+      if (capturedAtts.length) packet.context.attachments = mergeAttachments(packet.context.attachments || [], capturedAtts);
+      if ((packet.context.attachments || []).length > MAX_ATTACHMENTS) throw new Error(`At most ${MAX_ATTACHMENTS} attachments are supported. Nothing sent.`);
       validatePacket(packet);
       const config = await readConfiguration();
       const destination = destinationOf(config.url);

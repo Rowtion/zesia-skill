@@ -17,7 +17,7 @@
 }
 ```
 
-Top-level keys: requester, project, brief, context. Use actual requester and project labels, not authenticated ownership claims. Brief <=8000 characters; goal <=2000; originalReply <=8000. Up to 16 attributed statements (text <=2000); up to 8 materials (each <=6000). Do not duplicate statements in legacy facts/assumptions/constraints arrays. Full packet <=128 KiB; cloud preflight also budgets its system/profile context. The server's returned validation is authoritative. Nothing is automatically truncated.
+Top-level keys: `requester`, `project`, `brief`, `context`. Use actual requester and project labels, not authenticated ownership claims. Brief <=8000 characters; goal <=2000; originalReply <=8000. Up to 16 attributed statements (text <=2000); up to 16 materials (each <=12000; larger `evidenceFiles` excerpts are auto-chunked along line boundaries); up to 10 image/document attachments (`png`, `jpg`/`jpeg`, `webp`, `gif`, `pdf`, `txt`, `md`, `json`, total <=6 MiB). Do not duplicate statements in legacy facts/assumptions/constraints arrays. Full packet <=128 KiB (text packet budget); cloud preflight also budgets its system/profile context. The server's returned validation is authoritative. Nothing is automatically truncated.
 
 `kind`: fact / constraint / assumption. `origin`: user_statement / observation / agent_inference. User quotes must be verbatim; never fabricate references. The helper cannot verify quotes against the host transcript.
 
