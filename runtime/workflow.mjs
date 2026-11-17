@@ -17,8 +17,8 @@ import {
   scanPacket,
 } from './evidence.mjs';
 
-const DRAFT_TTL = 15 * 60 * 1000;
-const CONSULT_TTL = 60 * 60 * 1000;
+const DRAFT_TTL = 24 * 60 * 60 * 1000;
+const CONSULT_TTL = 24 * 60 * 60 * 1000;
 const MAX_ROUNDS = 3;
 const MAX_RECORDS = 20;
 const MAX_PREVIOUS_ADVICE = 12;

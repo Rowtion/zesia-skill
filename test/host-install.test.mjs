@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp, mkdir, writeFile, readFile, readdir, symlink, link, rm, open} from 'node:fs/promises';
+import {mkdtemp, mkdir, writeFile, readFile, readdir, symlink, link, rm, open, realpath} from 'node:fs/promises';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {install} from '../adapters/install.mjs';
@@ -23,3 +23,5 @@ test('hard-linked CLI cache files cannot be repaired through an external inode',
 test('hard-linked source files are rejected before copying external content',()=>fixture(async({root,project})=>{const source=await payload(root,'source');const outside=join(root,'external-sentinel');await writeFile(outside,'preserve-this');await link(outside,join(source,'extra.txt'));await assert.rejects(install({project,source,host:oldHost}),/hard.link/i);assert.equal(await readFile(outside,'utf8'),'preserve-this');}));
 
 test('upgrade retains old inodes outside Skill discovery for late editor writes',()=>fixture(async({root,project})=>{const old=await install({project,source:await payload(root,'old'),host:oldHost});const handle=await open(join(old.destination,'SKILL.md'),'r+');try{const host={...oldHost,version:'0.1.1'};const result=await install({project,source:await payload(root,'new',host,'new-content'),host,upgrade:true});await handle.truncate(0);await handle.writeFile('late-editor-write');assert.equal(await readFile(join(result.backup,'SKILL.md'),'utf8'),'late-editor-write');assert.equal(await readFile(join(result.destination,'SKILL.md'),'utf8'),'new-content');assert.match(result.backup,/\.zesia\/skill-backups\//);assert.match(await readFile(join(project,'.zesia/skill-backups/.gitignore'),'utf8'),/\n\*\n/);}finally{await handle.close();}}));
+
+test('defaults to user-scope global install under homeDir using userSkillDirectory',()=>fixture(async({root})=>{const homeDir=join(root,'home');await mkdir(homeDir);const userHost={...oldHost,id:'opencode',requester:'OpenCode',skillDirectory:'.opencode/skills',userSkillDirectory:'.config/opencode/skills'};const source=await payload(root,'user-source',userHost,'user-skill');const result=await install({source,host:userHost,homeDir});assert.equal(result.scope,'user');assert.equal(result.destination,join(await realpath(homeDir),'.config/opencode/skills/zesia-consult'));assert.equal(await readFile(join(result.destination,'SKILL.md'),'utf8'),'user-skill');}));
