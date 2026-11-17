@@ -7,7 +7,7 @@ export const ONLINE_ORIGINS=Object.freeze(['https://zesia.dev','https://zesia-pu
 const equal=(a,b)=>typeof a==='string'&&Buffer.byteLength(a)===Buffer.byteLength(b)&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
 const approvalKeys=['approvedHash','destination','draftId','protocolVersion','requestId'];
 const configureKeys=['destination','protocolVersion','token'];
-export async function startOnlineReview({runtime,draftId,onlineOrigin='https://zesia.dev',idleMs=5*60_000,lifetimeMs=15*60_000,onClose=()=>{}}){
+export async function startOnlineReview({runtime,draftId,onlineOrigin='https://zesia.dev',idleMs=24*60*60_000,lifetimeMs=24*60*60_000,onClose=()=>{}}){
  if(!ONLINE_ORIGINS.includes(onlineOrigin))throw Error('The online review origin is not supported.');
  const initial=await runtime.inspect(draftId);
  if(!initial.requestId)throw Error('This older draft cannot use online review. Prepare and review a new draft.');
@@ -40,7 +40,7 @@ export async function startOnlineReview({runtime,draftId,onlineOrigin='https://z
     return reply(res,204,null);
    }
    if(!equal(req.headers.authorization,'Bearer '+capability))return reply(res,403,{ok:false,message:'This review session has expired or is not authorized.'});
-   if(Date.now()-lastActivity>idleMs||(!busy&&Date.now()-started>lifetimeMs))return reply(res,410,{ok:false,message:'This review connection expired. Reopen it from your agent.'});
+   if(Date.now()-lastActivity>idleMs||(!busy&&Date.now()-started>lifetimeMs))return reply(res,410,{ok:false,message:'This review connection expired (24h limit). Reopen it from your agent.'});
    lastActivity=Date.now();
    if(req.method==='GET'&&req.url==='/bridge/v1/status?compact=1')return reply(res,200,await view(true));
    if(req.method==='GET'&&['/bridge/v1/view','/bridge/v1/status'].includes(req.url))return reply(res,200,await view());

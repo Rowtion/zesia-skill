@@ -1,6 +1,7 @@
 import {realpathSync,existsSync} from 'node:fs';
 import {mkdir, mkdtemp, readFile, readdir, lstat, realpath, cp, rm, rename, writeFile, open, unlink} from 'node:fs/promises';
 import {resolve, join, relative, isAbsolute, sep, basename} from 'node:path';
+import {homedir} from 'node:os';
 import {randomUUID, createHash} from 'node:crypto';
 import {pathToFileURL, fileURLToPath} from 'node:url';
 
@@ -53,14 +54,28 @@ async function provision(root, helper) {
   await installA2A({root});
 }
 
-export async function install({project, source, host, cliSeedDirectory, upgrade=false}) {
+export async function install({project, source, host, cliSeedDirectory, upgrade=false, scope, homeDir=homedir()}) {
   if(!host || !VERSION.test(host.version) || !VERSION.test(host.runtimeVersion) || typeof host.id!=='string' || typeof host.skillDirectory!=='string')throw Error('Invalid adapter version or host metadata.');
-  const root=await realpath(resolve(project));
-  const destination=resolve(root,host.skillDirectory,'zesia-consult');
-  if(isAbsolute(host.skillDirectory)||!inside(root,destination))throw Error('Invalid skill directory.');
-  const parent=resolve(destination,'..');
-  await directories(root,parent,true);
-  await directories(root,destination);
+  const installScope=scope || (project ? 'project' : 'user');
+  const baseDir=installScope==='user' ? homeDir : project;
+  if(!baseDir)throw Error('Provide the target project directory.');
+  const root=await realpath(resolve(baseDir));
+  const skillDir=installScope==='user' && typeof host.userSkillDirectory==='string' && host.userSkillDirectory.trim() ? host.userSkillDirectory.trim() : host.skillDirectory;
+  if(isAbsolute(skillDir))throw Error('Invalid skill directory.');
+  const rawParent=resolve(root,skillDir);
+  let parent=rawParent;
+  let parentRoot=root;
+  if(installScope==='user') {
+    await mkdir(rawParent,{recursive:true,mode:0o700});
+    parent=await realpath(rawParent);
+    parentRoot=parent;
+  } else {
+    if(!inside(root,resolve(rawParent,'zesia-consult')))throw Error('Invalid skill directory.');
+    await directories(root,parent,true);
+  }
+  const destination=resolve(parent,'zesia-consult');
+  if(installScope==='project' && !inside(root,destination))throw Error('Invalid skill directory.');
+  await directories(parentRoot,destination);
   const origin=await realpath(resolve(source));
   const rows=await inventory(origin);
   const contentSha256=identity(rows);
@@ -71,7 +86,7 @@ export async function install({project, source, host, cliSeedDirectory, upgrade=
   let handle;try{handle=await open(lock,'wx',0o600);}catch(e){if(e.code==='EEXIST')throw Error('Another installation may be in progress; review the existing install lock before retrying.');throw e;}
   let staged, backup, previousMarker;
   try {
-    await directories(root,destination);
+    await directories(parentRoot,destination);
     let existing=false;try{await lstat(destination);existing=true;}catch(e){if(e.code!=='ENOENT')throw e;}
     if(existing) {
       let marker;
@@ -88,14 +103,14 @@ export async function install({project, source, host, cliSeedDirectory, upgrade=
       if(marker.adapterVersion===host.version) {
         if(marker.runtimeVersion!==host.runtimeVersion || marker.contentSha256!==contentSha256)throw Error('The same version has different immutable content. Publish a new adapter version.');
         await provision(destination,join(origin,'scripts/install-a2a.mjs'));
-        return {destination,reused:true,adapterVersion:host.version};
+        return {destination,scope:installScope,reused:true,adapterVersion:host.version};
       }
       if(!upgrade)throw Error('A different managed version exists. Review the update, then rerun with --upgrade.');
       const before=marker.adapterVersion.split('.').map(Number),after=host.version.split('.').map(Number);
       const changed=after.findIndex((n,i)=>n!==before[i]);
       if(changed>=0 && after[changed]<before[changed])throw Error('Refusing to downgrade a managed adapter.');
     }
-    await directories(root,parent);
+    await directories(parentRoot,parent);
     staged=await mkdtemp(join(parent,'.zesia-consult.tmp-'));
     await cp(origin,staged,{recursive:true,filter:path=>path===origin||!excluded(relative(origin,path).split(sep)[0])});
     const seed=cliSeedDirectory || (existing && await cache(destination)?join(destination,'bin'):null);
@@ -103,7 +118,7 @@ export async function install({project, source, host, cliSeedDirectory, upgrade=
     await provision(staged,join(staged,'scripts/install-a2a.mjs'));
     if(identity(await inventory(staged))!==contentSha256)throw Error('Staged Skill content changed during installation.');
     await writeFile(join(staged,'zesia-install.json'),JSON.stringify({format:FORMAT,host:host.id,requester:host.requester,adapterVersion:host.version,runtimeVersion:host.runtimeVersion,contentSha256},null,2)+'\n');
-    await directories(root,destination);
+    await directories(parentRoot,destination);
     if(existing) {
       const currentMarker=await readFile(join(destination,'zesia-install.json'));
       if(!currentMarker.equals(previousMarker) || identity(await inventory(destination))!==JSON.parse(previousMarker.toString('utf8')).contentSha256)throw Error('The existing Skill changed during installation; user changes were preserved.');
@@ -121,7 +136,7 @@ export async function install({project, source, host, cliSeedDirectory, upgrade=
     try {await rename(staged,destination);staged=null;}
     catch(error) {if(backup){try{await rename(backup,destination);backup=null;}catch{throw Error('Publication failed; the original installation is preserved at '+backup);}}throw error;}
     // Keep old inodes: a concurrent editor may still hold an open file descriptor.
-    return {destination,reused:false,upgraded:existing,adapterVersion:host.version,...(backup?{backup}:{})};
+    return {destination,scope:installScope,reused:false,upgraded:existing,adapterVersion:host.version,...(backup?{backup}:{})};
   } finally {
     if(staged)await rm(staged,{recursive:true,force:true});
     await handle.close();await unlink(lock);
