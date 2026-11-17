@@ -4,6 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { createWorkflow } from '../runtime/workflow.mjs';
+import { createPortable } from '../runtime.mjs';
+import { consultOverA2A } from '../runtime/a2a.mjs';
 
 test('auto-chunks large evidenceFiles along line boundaries up to 16 materials of 12,000 chars', async () => {
   const prevCwd = process.cwd();
@@ -44,7 +46,6 @@ test('captures image attachmentFiles and enforces 6 MiB / supported type rules',
   try {
     process.chdir(dir);
     const imgPath = path.join(dir, 'screenshot.png');
-    // Minimal valid 1x1 PNG bytes
     const pngBytes = Buffer.from(
       '89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de0000000c49444154789c63606060000000040001f61738550000000049454e44ae426082',
       'hex',
@@ -80,6 +81,59 @@ test('captures image attachmentFiles and enforces 6 MiB / supported type rules',
     });
     assert.equal(badRes.ok, false);
     assert.equal(badRes.errorCode, 'preparation_failed');
+  } finally {
+    process.chdir(prevCwd);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('createPortable prepare expands attachmentFiles and consultOverA2A accepts >200 KiB attachments', async () => {
+  const prevCwd = process.cwd();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zesia-portable-att-'));
+  try {
+    process.chdir(dir);
+    const largeBytes = Buffer.alloc(190_000, 0x41);
+    fs.writeFileSync(path.join(dir, 'large.png'), largeBytes);
+
+    const runtime = createPortable({
+      stateDir: path.join(dir, 'state'),
+      configuration: async () => ({ url: 'https://consult.example', token: 'synthetic-token' }),
+    });
+    const prepared = await runtime.prepare({
+      requester: 'Codex',
+      project: 'demo',
+      brief: 'Inspect screenshot.',
+      context: { goal: 'Check UI.' },
+      attachmentFiles: [{ path: 'large.png' }],
+    });
+    assert.equal(prepared.ok, true);
+    assert.equal(prepared.packet.context.attachments[0].filename, 'large.png');
+    assert.ok(Buffer.byteLength(prepared.packet.context.attachments[0].data, 'utf8') > 200_000);
+
+    let calls = 0;
+    const result = await consultOverA2A({
+      url: 'https://consult.example',
+      token: 'synthetic-cli-secret',
+      input: prepared.packet,
+      fetch: async (_url, init) => {
+        calls++;
+        const rpc = JSON.parse(init.body);
+        return Response.json({
+          jsonrpc: '2.0',
+          id: rpc.id,
+          result: {
+            message: {
+              messageId: 'm1',
+              contextId: 'c1',
+              role: 'ROLE_AGENT',
+              parts: [{ mediaType: 'application/vnd.zesia.consult+json', data: { format: 'zesia.consult.v0', advice: 'Looks good.', consultId: 'cid1', followUp: { requests: [] } } }],
+            },
+          },
+        });
+      },
+    });
+    assert.equal(calls, 1);
+    assert.equal(result.consultId, 'cid1');
   } finally {
     process.chdir(prevCwd);
     fs.rmSync(dir, { recursive: true, force: true });

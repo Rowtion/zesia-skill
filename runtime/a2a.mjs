@@ -60,7 +60,7 @@ export async function consultOverA2A({url,token,input,contextId,clientRequestId,
  const server=createServer(async(request,response)=>{
   try{
    if(request.method!=='POST'||request.url!=='/a2a'||request.headers.authorization!==`Bearer ${nonce}`){response.writeHead(403);response.end('{}');return;}
-   let size=0;const chunks=[];for await(const chunk of request){size+=chunk.length;if(size>160*1024)throw Error('CLI request exceeded the input limit.');chunks.push(chunk);}
+   let size=0;const chunks=[];for await(const chunk of request){size+=chunk.length;if(size>10*1024*1024)throw Error('CLI request exceeded the input limit.');chunks.push(chunk);}
    const body=JSON.parse(Buffer.concat(chunks).toString());
    if(body.method!=='SendMessage'||!timingSafeEqual(hash(body.params?.message),expected)||attempts!==0){response.writeHead(409);response.end('{}');return;}
    attempts++;onStage('cloud_consultation');

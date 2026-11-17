@@ -2,7 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, readdir, readFile, rename, writeFile, unlink, link, lstat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { validatePacket } from './runtime/workflow.mjs';
+import { stripAttachments, validatePacket } from './runtime/workflow.mjs';
+import { captureEvidence, mergeEvidence, captureAttachments, mergeAttachments } from './runtime/evidence.mjs';
 import { readConfig, saveConfig, destinationOf } from './runtime/config.mjs';
 import { consultOverA2A, recoverConsult, ackConsult } from './runtime/a2a.mjs';
 import { runtimeVersion } from './runtime/standalone.mjs';
@@ -19,7 +20,7 @@ const hash = value => createHash('sha256').update(canonical(value)).digest('hex'
 function check(packet) {
   if (typeof packet?.requester !== 'string' || !packet.requester.trim() || packet.requester.length > 160) throw new Error('Provide your actual agent name as requester.');
   validatePacket(packet, packet.requester);
-  if (Buffer.byteLength(JSON.stringify(packet)) > 128 * 1024) throw new Error('The packet exceeds 128 KiB. Nothing was sent.');
+  if (Buffer.byteLength(JSON.stringify(stripAttachments(packet))) > 128 * 1024) throw new Error('The packet exceeds 128 KiB. Nothing was sent.');
 }
 export function createPortable({
   stateDir = process.env.ZESIA_STATE_DIR || join(homedir(), '.local/state/zesia/consult'),
@@ -103,8 +104,20 @@ export function createPortable({
       destination: record.destination, packet: record.packet, expiresAt: new Date(record.expiresAt).toISOString(), networkCalls: 0 };
   }
   return {
-    async prepare(packet) {
-      if (packet?.context?.continuation) throw new Error('Use followup with an actual prior result.');
+    async prepare(inputPacket) {
+      if (inputPacket?.context?.continuation) throw new Error('Use followup with an actual prior result.');
+      const packet = structuredClone(inputPacket || {});
+      if (!packet.context || typeof packet.context !== 'object') packet.context = {};
+      if (Array.isArray(packet.evidenceFiles) && packet.evidenceFiles.length) {
+        const captured = await captureEvidence(packet.evidenceFiles);
+        if (captured.length) packet.context.materials = mergeEvidence(packet.context.materials || [], captured);
+      }
+      delete packet.evidenceFiles;
+      if (Array.isArray(packet.attachmentFiles) && packet.attachmentFiles.length) {
+        const capturedAtts = await captureAttachments(packet.attachmentFiles);
+        if (capturedAtts.length) packet.context.attachments = mergeAttachments(packet.context.attachments || [], capturedAtts);
+      }
+      delete packet.attachmentFiles;
       return stage(packet);
     },
     async send(id, approvedHash, confirmation) {
