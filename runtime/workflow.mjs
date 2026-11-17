@@ -110,10 +110,12 @@ function validateContext(context) {
   for (const item of boundedArray(context.attachments, 'context.attachments', MAX_ATTACHMENTS)) {
     boundedString(item?.id, 'context.attachments[].id', 100);
     if (item?.filename !== undefined) boundedString(item.filename, 'context.attachments[].filename', 200);
+    if (item?.description !== undefined) boundedString(item.description, 'context.attachments[].description', 200);
     if (!ALLOWED_MEDIA_TYPES.has(item?.mediaType)) throw new Error('context.attachments[].mediaType is not supported.');
-    boundedString(item?.data, 'context.attachments[].data', MAX_ATTACHMENT_BYTES);
-    if (!attachmentPayload(item).valid) throw new Error('context.attachments[].data must be valid base64 or a matching base64 data URL.');
-    totalAttachmentBytes += Buffer.byteLength(item.data, 'utf8');
+    boundedString(item?.data, 'context.attachments[].data', 9 * 1024 * 1024);
+    const parsedAtt = attachmentPayload(item);
+    if (!parsedAtt.valid) throw new Error('context.attachments[].data must be valid base64 or a matching base64 data URL.');
+    totalAttachmentBytes += parsedAtt.bytes;
   }
   if (totalAttachmentBytes > MAX_ATTACHMENT_BYTES) {
     throw new Error(`context.attachments total size exceeds ${Math.round(MAX_ATTACHMENT_BYTES / (1024 * 1024))} MiB.`);
@@ -123,6 +125,23 @@ function validateContext(context) {
     // 128 KiB input budget to this and the rest of the context together.
     boundedString(item, 'context.previousAdvice[]', 128 * 1024);
   }
+}
+
+export function stripAttachments(packet) {
+  if (!packet?.context?.attachments?.length) return packet;
+  return {
+    ...packet,
+    context: {
+      ...packet.context,
+      attachments: packet.context.attachments.map(att => ({
+        id: att.id,
+        ...(att.filename ? { filename: att.filename } : {}),
+        ...(att.description ? { description: att.description } : {}),
+        mediaType: att.mediaType,
+        bytes: attachmentPayload(att).bytes,
+      })),
+    },
+  };
 }
 
 export function validatePacket(packet, requester = REQUESTER) {
