@@ -6,6 +6,14 @@ import { stripAttachments, validatePacket } from './runtime/workflow.mjs';
 import { captureEvidence, mergeEvidence, captureAttachments, mergeAttachments } from './runtime/evidence.mjs';
 import { readConfig, saveConfig, destinationOf } from './runtime/config.mjs';
 import { consultOverA2A, recoverConsult, ackConsult } from './runtime/a2a.mjs';
+import {
+  defaultProfilePath,
+  formatProfileMarkdown,
+  injectProfileStatements,
+  readProfile,
+  removeProfileItem,
+  setProfileItem,
+} from './runtime/profile.mjs';
 import { runtimeVersion } from './runtime/standalone.mjs';
 
 export function portableEnvironment(env = process.env) {
@@ -22,12 +30,15 @@ function check(packet) {
   validatePacket(packet, packet.requester);
   if (Buffer.byteLength(JSON.stringify(stripAttachments(packet))) > 128 * 1024) throw new Error('The packet exceeds 128 KiB. Nothing was sent.');
 }
+const DEFAULT_STATE_DIR = () => process.env.ZESIA_STATE_DIR || join(homedir(), '.local/state/zesia/consult');
 export function createPortable({
-  stateDir = process.env.ZESIA_STATE_DIR || join(homedir(), '.local/state/zesia/consult'),
+  stateDir = DEFAULT_STATE_DIR(),
+  profilePath,
   configuration = () => readConfig(portableEnvironment(), { requireToken: false }),
   saveConfiguration = values => saveConfig(values, portableEnvironment()),
   consult = consultOverA2A, recover = recoverConsult, ack = ackConsult, now = Date.now,
 } = {}) {
+  const resolvedProfilePath = profilePath || defaultProfilePath(process.env, stateDir !== DEFAULT_STATE_DIR() ? stateDir : null);
   const path = id => {
     if (!/^[0-9a-f-]{36}$/.test(id || '')) throw new Error('Invalid draft ID.');
     return join(stateDir, id+'.json');
@@ -118,6 +129,11 @@ export function createPortable({
         if (capturedAtts.length) packet.context.attachments = mergeAttachments(packet.context.attachments || [], capturedAtts);
       }
       delete packet.attachmentFiles;
+      const profile = await readProfile(resolvedProfilePath);
+      if (profile.items.length > 0 && (packet.context.statements === undefined || Array.isArray(packet.context.statements))) {
+        const merged = injectProfileStatements(packet.context.statements || [], profile);
+        if (merged.length) packet.context.statements = merged;
+      }
       return stage(packet);
     },
     async send(id, approvedHash, confirmation) {
@@ -198,8 +214,9 @@ export function createPortable({
       const reauthRequired = Boolean(record.reauthRequired);
       if(compact)return {status:record.status,configured,reauthRequired,agentReceivedAt:await receivedAt(id),
         ...(record.result?.ok===false?{result:{message:record.result.message}}:{})};
+      const profile=await readProfile(resolvedProfilePath).catch(()=>({version:1,updatedAt:null,items:[]}));
       return {ok:true,draftId:record.id,requestId:record.requestId,status:record.status,configured,reauthRequired,approvedHash:record.hash,
-        destination:record.destination,packet:structuredClone(record.packet),
+        destination:record.destination,packet:structuredClone(record.packet),profile,
         expiresAt:new Date(record.expiresAt).toISOString(),result:record.result || null,rawResult:record.rawResult||null,agentReceivedAt:await receivedAt(id)};
     },
     async cancel(id, approvedHash) {
@@ -316,6 +333,10 @@ export function createPortable({
         items,
       };
     },
+    profile: () => readProfile(resolvedProfilePath),
+    profileMarkdown: async () => formatProfileMarkdown(await readProfile(resolvedProfilePath)),
+    setProfile: input => setProfileItem(input, { path: resolvedProfilePath, now }),
+    removeProfile: itemId => removeProfileItem(itemId, { path: resolvedProfilePath, now }),
   };
 
   async function inspectRecords({ retentionDays = 7, all = false } = {}) {
