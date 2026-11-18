@@ -32,9 +32,12 @@ Write one private packet file and run:
 ```
 
 Supply your actual agent name as requester and the user's project as project. Preparation
-is local, including validation; it makes no cloud preflight or model call. The CLI returns
-compact draft metadata, not a second copy of the evidence packet. Keep the packet out of
-chat replies and user-message composers. Never ask the user to open a local preview file.
+is local, including validation; it makes no cloud preflight or model call. If a local
+Zesia Profile exists (`~/.config/zesia/profile.json` or `ZESIA_PROFILE`), `prepare`
+automatically merges its constraints into `context.statements` (`id: "profile:<id>"`,
+`sourceRef: "zesia:profile:<id>"`) without overwriting explicit same-ID entries. The CLI
+returns compact draft metadata, not a second copy of the evidence packet. Keep the packet
+out of chat replies and user-message composers. Never ask the user to open a local preview file.
 
 ## Review and send
 
@@ -72,3 +75,9 @@ and ask the user only for decisions they must make. For an actual followUp quest
 exact user quote for a user decision. Then review the new draft and wait again. Each round
 has a new request ID and a fresh approval, preserving the actual A2A contextId. Do not invent
 answers or treat send confirmation as factual verification or a substantive user decision.
+
+When the user explicitly establishes a cross-task preference or engineering redline during
+preparation, follow-up, or adoption review, save it in-place with the user's exact verbatim
+words via `<skill-directory>/scripts/zesia profile set <id> "<text>" --quote "<sourceQuote>"`
+and echo the change in one line of your reply. Never write `agent_inference` silently into
+Profile.

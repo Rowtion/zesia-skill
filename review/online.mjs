@@ -7,6 +7,7 @@ export const ONLINE_ORIGINS=Object.freeze(['https://zesia.dev','https://zesia-pu
 const equal=(a,b)=>typeof a==='string'&&Buffer.byteLength(a)===Buffer.byteLength(b)&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
 const approvalKeys=['approvedHash','destination','draftId','protocolVersion','requestId'];
 const configureKeys=['destination','protocolVersion','token'];
+const profileKeys=['id','protocolVersion','sourceQuote','text'];
 export async function startOnlineReview({runtime,draftId,onlineOrigin='https://zesia.dev',idleMs=24*60*60_000,lifetimeMs=24*60*60_000,onClose=()=>{}}){
  if(!ONLINE_ORIGINS.includes(onlineOrigin))throw Error('The online review origin is not supported.');
  const initial=await runtime.inspect(draftId);
@@ -20,7 +21,7 @@ export async function startOnlineReview({runtime,draftId,onlineOrigin='https://z
  }
  async function body(req){
   if(req.headers['content-type']!=='application/json')throw Error('Expected application/json.');
-  const chunks=[];let size=0;for await(const part of req){size+=part.length;if(size>2048)throw Error('The approval exceeds 2 KiB.');chunks.push(part);}
+  const chunks=[];let size=0;for await(const part of req){size+=part.length;if(size>8192)throw Error('The payload exceeds 8 KiB.');chunks.push(part);}
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
  }
  async function view(compact=false){
@@ -44,8 +45,18 @@ export async function startOnlineReview({runtime,draftId,onlineOrigin='https://z
    lastActivity=Date.now();
    if(req.method==='GET'&&req.url==='/bridge/v1/status?compact=1')return reply(res,200,await view(true));
    if(req.method==='GET'&&['/bridge/v1/view','/bridge/v1/status'].includes(req.url))return reply(res,200,await view());
-   if(req.method!=='POST'||!['/bridge/v1/approve','/bridge/v1/cancel','/bridge/v1/configure'].includes(req.url))return reply(res,404,{ok:false,message:'Unknown bridge operation.'});
+   if(req.method!=='POST'||!['/bridge/v1/approve','/bridge/v1/cancel','/bridge/v1/configure','/bridge/v1/profile'].includes(req.url))return reply(res,404,{ok:false,message:'Unknown bridge operation.'});
    const input=await body(req);
+   if(req.url==='/bridge/v1/profile'){
+    if(!input||Array.isArray(input))return reply(res,400,{ok:false,message:'Invalid profile payload.'});
+    if(input.origin!==undefined&&input.origin!=='user_statement')return reply(res,400,{ok:false,message:'Agent inferences cannot be saved to Profile; a verbatim user quote is required.'});
+    const keys=Object.keys(input).filter(key=>key!=='origin').sort();
+    if(keys.join(',')!==profileKeys.join(','))return reply(res,400,{ok:false,message:'Invalid profile payload.'});
+    if(input.protocolVersion!==ONLINE_PROTOCOL)return reply(res,400,{ok:false,message:'Unsupported bridge protocol version.'});
+    if(typeof runtime.setProfile!=='function')return reply(res,501,{ok:false,message:'Profile updates are not supported by this runtime.'});
+    await runtime.setProfile({id:input.id,text:input.text,sourceQuote:input.sourceQuote,origin:input.origin});
+    return reply(res,200,await view());
+   }
    if(req.url==='/bridge/v1/configure'){
     if(!input||Array.isArray(input)||Object.keys(input).sort().join(',')!==configureKeys.join(','))return reply(res,400,{ok:false,message:'Invalid configuration payload.'});
     if(input.protocolVersion!==ONLINE_PROTOCOL)return reply(res,400,{ok:false,message:'Unsupported bridge protocol version.'});

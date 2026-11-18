@@ -26,6 +26,20 @@ try {
     value=await runtime.clean({apply,all,retentionDays});
   }
   else if(command==='followup')value=await runtime.followup(id,JSON.parse(await readFile(hash,'utf8')));
+  else if(command==='profile'){
+    const args=process.argv.slice(3);
+    const sub=args[0];
+    if(!sub||sub==='export'){
+      if(args.length>1)throw Error('Use: zesia profile [export].');
+      process.stdout.write(await runtime.profileMarkdown());
+    }else if(sub==='set'){
+      if(args.length!==5||args[3]!=='--quote')throw Error('Use: zesia profile set <id> "<text>" --quote "<sourceQuote>".');
+      value=await runtime.setProfile({id:args[1],text:args[2],sourceQuote:args[4]});
+    }else if(sub==='rm'){
+      if(args.length!==2||!args[1])throw Error('Use: zesia profile rm <id>.');
+      value=await runtime.removeProfile(args[1]);
+    }else throw Error('Use: zesia profile [export | set <id> "<text>" --quote "<sourceQuote>" | rm <id>].');
+  }
   else if(command==='review'){
     if(hash && hash!=='--no-open')throw Error('Use review <draftId> [--no-open].');
     value=await launchOnlineReview(fileURLToPath(import.meta.url),id,{openBrowser:hash!=='--no-open'});
@@ -76,7 +90,7 @@ try {
     while(true){value=await runtime.result(id,{markReceived:true});if(value.status==='completed'||value.code==='cancelled'||(!value.pending&&(value.retryAllowed===false||value.outcome))||Date.now()>=until)break;await pause(500);}
     if(value.code==='result_unavailable')value={ok:true,status:value.status,draftId:id,pending:true,hint:'The local result is not ready. Use result later; do not send or prepare a duplicate.'};
   }
-  else if(command==='--help')value={commands:['configure [--token-file <file>]','install [--project <dir>] [--upgrade]','prepare <packet.json>','review <draftId> [--no-open]','wait <draftId> [seconds:1-900]','result <draftId>','diagnose <draftId>','list','clean [--apply] [--all] [--days <N>]','followup <draftId> <answers.json>','send <draftId> <approvedHash> <confirmation.txt> (legacy explicit-confirmation interface)'],note:'Installation defaults to user scope under $HOME (no administrator access); pass --project <dir> for project scope. Preparation is local. Use review for the shared zesia.dev window. Only its approval sends materials.'};
+  else if(command==='--help')value={commands:['configure [--token-file <file>]','install [--project <dir>] [--upgrade]','profile [export | set <id> "<text>" --quote "<sourceQuote>" | rm <id>]','prepare <packet.json>','review <draftId> [--no-open]','wait <draftId> [seconds:1-900]','result <draftId>','diagnose <draftId>','list','clean [--apply] [--all] [--days <N>]','followup <draftId> <answers.json>','send <draftId> <approvedHash> <confirmation.txt> (legacy explicit-confirmation interface)'],note:'Installation defaults to user scope under $HOME (no administrator access); pass --project <dir> for project scope. Preparation is local. Use review for the shared zesia.dev window. Only its approval sends materials.'};
   else throw Error('Unknown command. Run with --help.');
   if(['prepare','followup'].includes(command)&&value){delete value.packet;value.hint='Materials are prepared locally. Open review, then wait for the result. Do not paste or send the packet from chat.';}
   if(value!==undefined&&!['serve-review','serve-online-review'].includes(command))console.log(JSON.stringify(value,null,2));
