@@ -56,6 +56,6 @@ jobs:
         run: |
           set -euo pipefail
           for target in darwin-arm64 darwin-x64 linux-arm64 linux-x64 win32-x64 node; do
-            sha256sum --check "zesia-setup-1.0.1-${target}.zip.sha256"
+            sha256sum --check "zesia-setup-1.0.2-${target}.zip.sha256"
           done
-          gh release create setup-v1.0.1 ./*.zip ./*.sha256 --target "$GITHUB_SHA" --title "Official installer 1.0.1" --latest=false --notes "Verified host setup and first-use guide. Includes Node and standalone builds."
+          gh release create setup-v1.0.2 ./*.zip ./*.sha256 --target "$GITHUB_SHA" --title "Official installer 1.0.2" --latest=false --notes "Verified host setup and first-use guide. Includes Node and standalone builds."
