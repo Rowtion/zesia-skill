@@ -25,9 +25,11 @@ export async function startOnlineReview({runtime,draftId,onlineOrigin='https://z
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
  }
  async function view(compact=false){
-  if(!busy)await runtime.recover?.(draftId).catch(()=>{});
+  const recovered=busy?null:await runtime.recover?.(draftId).catch(()=>{});
   const data=await runtime.inspect(draftId,{compact});
-  return {...data,compactStatus:true,protocolVersion:ONLINE_PROTOCOL,requestInProgress:busy,...(lastError?{bridgeError:lastError}:{}),resultRetentionSeconds:86400};
+  // Surface the cloud observation without changing the durable local checkpoint.
+  const requestInProgress=busy||(data.status==='unknown'&&recovered?.recoveryState==='running');
+  return {...data,compactStatus:true,protocolVersion:ONLINE_PROTOCOL,requestInProgress,...(lastError?{bridgeError:lastError}:{}),resultRetentionSeconds:86400};
  }
  const server=createServer(async(req,res)=>{
   try{
