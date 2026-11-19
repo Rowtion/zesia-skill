@@ -183,8 +183,13 @@ test('401 unauthorized sets reauthRequired and configure resets draft for re-sen
  try{
   await fetch(origin+'/bridge/v1/approve',{method:'POST',headers,body:JSON.stringify(approval)});
   let view;
-  for(let i=0;i<30;i++){view=await(await fetch(origin+'/bridge/v1/status',{headers})).json();if(view.status==='failed')break;await new Promise(r=>setTimeout(r,5));}
+  for(let i=0;i<30;i++){
+   view=await(await fetch(origin+'/bridge/v1/status',{headers})).json();
+   if(view.status==='failed'&&!view.requestInProgress)break;
+   await new Promise(r=>setTimeout(r,5));
+  }
   assert.equal(view.status,'failed');
+  assert.equal(view.requestInProgress,false);
   assert.equal(view.reauthRequired,true);
 
   const reconfigured=await fetch(origin+'/bridge/v1/configure',{method:'POST',headers,body:JSON.stringify({protocolVersion:1,destination:'https://api.zesia.dev',token:freshToken})});

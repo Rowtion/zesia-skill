@@ -7,7 +7,7 @@ export const ONLINE_ORIGINS=Object.freeze(['https://zesia.dev','https://zesia-pu
 const equal=(a,b)=>typeof a==='string'&&Buffer.byteLength(a)===Buffer.byteLength(b)&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
 const approvalKeys=['approvedHash','destination','draftId','protocolVersion','requestId'];
 const configureKeys=['destination','protocolVersion','token'];
-const profileKeys=['id','protocolVersion','sourceQuote','text'];
+const profileKeys=['expectedUpdatedAt','id','protocolVersion','statementId'];
 export async function startOnlineReview({runtime,draftId,onlineOrigin='https://zesia.dev',idleMs=24*60*60_000,lifetimeMs=24*60*60_000,onClose=()=>{},onGuideView}){
  if(!ONLINE_ORIGINS.includes(onlineOrigin))throw Error('The online review origin is not supported.');
  const initial=await runtime.inspect(draftId);
@@ -29,7 +29,8 @@ export async function startOnlineReview({runtime,draftId,onlineOrigin='https://z
   const data=await runtime.inspect(draftId,{compact});
   // Surface the cloud observation without changing the durable local checkpoint.
   const requestInProgress=busy||(data.status==='unknown'&&recovered?.recoveryState==='running');
-  return {...data,compactStatus:true,protocolVersion:ONLINE_PROTOCOL,requestInProgress,...(lastError?{bridgeError:lastError}:{}),resultRetentionSeconds:86400};
+  return {...data,compactStatus:true,protocolVersion:ONLINE_PROTOCOL,requestInProgress,
+   ...(!compact&&typeof runtime.setProfile==='function'&&data.profile?{profileWriteVersion:1}:{}),...(lastError?{bridgeError:lastError}:{}),resultRetentionSeconds:86400};
  }
  const server=createServer(async(req,res)=>{
   try{
@@ -56,13 +57,24 @@ export async function startOnlineReview({runtime,draftId,onlineOrigin='https://z
    if(req.method!=='POST'||!['/bridge/v1/approve','/bridge/v1/cancel','/bridge/v1/configure','/bridge/v1/profile'].includes(req.url))return reply(res,404,{ok:false,message:'Unknown bridge operation.'});
    const input=await body(req);
    if(req.url==='/bridge/v1/profile'){
-    if(!input||Array.isArray(input))return reply(res,400,{ok:false,message:'Invalid profile payload.'});
-    if(input.origin!==undefined&&input.origin!=='user_statement')return reply(res,400,{ok:false,message:'Agent inferences cannot be saved to Profile; a verbatim user quote is required.'});
-    const keys=Object.keys(input).filter(key=>key!=='origin').sort();
-    if(keys.join(',')!==profileKeys.join(','))return reply(res,400,{ok:false,message:'Invalid profile payload.'});
+    if(!input||Array.isArray(input)||Object.keys(input).sort().join(',')!==profileKeys.join(',')
+      ||typeof input.statementId!=='string'||!input.statementId||input.statementId.length>100
+      ||(input.expectedUpdatedAt!==null&&typeof input.expectedUpdatedAt!=='string'))
+      return reply(res,400,{ok:false,message:'Select a statement and a Profile slot from this review.'});
     if(input.protocolVersion!==ONLINE_PROTOCOL)return reply(res,400,{ok:false,message:'Unsupported bridge protocol version.'});
     if(typeof runtime.setProfile!=='function')return reply(res,501,{ok:false,message:'Profile updates are not supported by this runtime.'});
-    await runtime.setProfile({id:input.id,text:input.text,sourceQuote:input.sourceQuote,origin:input.origin});
+    const current=await runtime.inspect(draftId);
+    if(busy||!['prepared','completed'].includes(current.status)||
+      (current.status==='prepared'&&Date.now()>Date.parse(current.expiresAt)))
+      return reply(res,409,{ok:false,message:'Open a current review or completed result to save a constraint.'});
+    const statement=current.packet?.context?.statements?.find(item=>item.id===input.statementId);
+    if(statement?.kind!=='constraint'||statement.origin!=='user_statement'||
+      statement.sourceRef.startsWith('zesia:profile:')||!statement.sourceQuote.trim())
+      return reply(res,400,{ok:false,message:'Choose a constraint with the original user quote in this review.'});
+    await runtime.setProfile({
+      id:input.id,text:statement.text,sourceQuote:statement.sourceQuote,origin:statement.origin,
+      expectedUpdatedAt:input.expectedUpdatedAt,
+    });
     return reply(res,200,await view());
    }
    if(req.url==='/bridge/v1/configure'){

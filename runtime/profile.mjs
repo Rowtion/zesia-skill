@@ -1,4 +1,6 @@
-import { chmod, lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
+import { lstat, mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { assertNoSecrets } from './evidence.mjs';
@@ -105,16 +107,36 @@ export async function readProfile(path = defaultProfilePath()) {
   return { version: PROFILE_VERSION, updatedAt: doc.updatedAt, items: doc.items };
 }
 
-export async function writeProfile(doc, path = defaultProfilePath()) {
+async function withProfileLock(path, update) {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const lockPath = `${path}.lock`;
+  const deadline = Date.now() + 2500;
+  let lock;
+  while (!lock) {
+    try {
+      lock = await open(lockPath, 'wx', 0o600);
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      if (Date.now() >= deadline) throw new Error('The local Profile is busy. Wait for the other update and try again.');
+      await delay(20);
+    }
+  }
+  try {
+    return await update();
+  } finally {
+    try { await lock.close(); }
+    finally { await unlink(lockPath); }
+  }
+}
+
+async function commitProfile(doc, path) {
   const serialized = `${JSON.stringify(doc, null, 2)}\n`;
   const bytes = Buffer.byteLength(serialized, 'utf8');
   validateProfile(doc, bytes);
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
+  const temporary = `${path}.${randomUUID()}.tmp`;
   try {
-    await writeFile(temporary, serialized, { mode: 0o600 });
+    await writeFile(temporary, serialized, { mode: 0o600, flag: 'wx' });
     await rename(temporary, path);
-    await chmod(path, 0o600);
   } catch (error) {
     await unlink(temporary).catch(() => {});
     throw error;
@@ -122,43 +144,59 @@ export async function writeProfile(doc, path = defaultProfilePath()) {
   return { bytes, path };
 }
 
-export async function setProfileItem({ id, text, sourceQuote, origin } = {}, { path = defaultProfilePath(), now = Date.now } = {}) {
+export function writeProfile(doc, path = defaultProfilePath()) {
+  return withProfileLock(path, () => commitProfile(doc, path));
+}
+
+function profileTimestamp(profile, now) {
+  const previous = Date.parse(profile.updatedAt ?? '');
+  return new Date(Number.isFinite(previous) ? Math.max(now(), previous + 1) : now()).toISOString();
+}
+
+export async function setProfileItem({ id, text, sourceQuote, origin, expectedUpdatedAt } = {}, { path = defaultProfilePath(), now = Date.now } = {}) {
   if (origin !== undefined && origin !== 'user_statement') {
     throw new Error('Only user_statement principles with a verbatim sourceQuote can be saved to Profile.');
   }
-  const current = await readProfile(path);
-  const timestamp = new Date(now()).toISOString();
-  const nextItem = { id, text, sourceQuote, updatedAt: timestamp };
-  validateItemShape(nextItem);
-  const items = current.items.map(item => ({ ...item }));
-  const index = items.findIndex(item => item.id === id);
-  let action;
-  if (index !== -1) {
-    items[index] = nextItem;
-    action = 'updated';
-  } else if (items.length >= MAX_PROFILE_ITEMS) {
-    throw new Error(`Profile already has ${MAX_PROFILE_ITEMS} items (max ${MAX_PROFILE_ITEMS}). Overwrite an existing id in-place or remove one with "zesia profile rm <id>".`);
-  } else {
-    items.push(nextItem);
-    action = 'created';
-  }
-  const { bytes } = await writeProfile({ version: PROFILE_VERSION, updatedAt: timestamp, items }, path);
-  return { ok: true, action, item: nextItem, count: items.length, maxItems: MAX_PROFILE_ITEMS, bytes, maxBytes: MAX_PROFILE_BYTES, path };
+  return withProfileLock(path, async () => {
+    const current = await readProfile(path);
+    const timestamp = profileTimestamp(current, now);
+    const nextItem = { id, text, sourceQuote, updatedAt: timestamp };
+    validateItemShape(nextItem);
+    const items = current.items.map(item => ({ ...item }));
+    const index = items.findIndex(item => item.id === id);
+    if (expectedUpdatedAt !== undefined && (items[index]?.updatedAt ?? null) !== expectedUpdatedAt) {
+      throw new Error('The selected Profile slot changed. Refresh the review before saving again.');
+    }
+    let action;
+    if (index !== -1) {
+      items[index] = nextItem;
+      action = 'updated';
+    } else if (items.length >= MAX_PROFILE_ITEMS) {
+      throw new Error(`Profile already has ${MAX_PROFILE_ITEMS} items (max ${MAX_PROFILE_ITEMS}). Overwrite an existing id in-place or remove one with "zesia profile rm <id>".`);
+    } else {
+      items.push(nextItem);
+      action = 'created';
+    }
+    const { bytes } = await commitProfile({ version: PROFILE_VERSION, updatedAt: timestamp, items }, path);
+    return { ok: true, action, item: nextItem, count: items.length, maxItems: MAX_PROFILE_ITEMS, bytes, maxBytes: MAX_PROFILE_BYTES, path };
+  });
 }
 
 export async function removeProfileItem(id, { path = defaultProfilePath(), now = Date.now } = {}) {
   if (typeof id !== 'string' || !ID_PATTERN.test(id)) {
     throw new Error('Profile item id must be 1-32 alphanumeric, dot, underscore, or hyphen characters.');
   }
-  const current = await readProfile(path);
-  const index = current.items.findIndex(item => item.id === id);
-  if (index === -1) {
-    throw new Error(`Profile item "${id}" does not exist.`);
-  }
-  const items = current.items.filter((_, idx) => idx !== index);
-  const timestamp = new Date(now()).toISOString();
-  const { bytes } = await writeProfile({ version: PROFILE_VERSION, updatedAt: timestamp, items }, path);
-  return { ok: true, action: 'removed', id, count: items.length, maxItems: MAX_PROFILE_ITEMS, bytes, maxBytes: MAX_PROFILE_BYTES, path };
+  return withProfileLock(path, async () => {
+    const current = await readProfile(path);
+    const index = current.items.findIndex(item => item.id === id);
+    if (index === -1) {
+      throw new Error(`Profile item "${id}" does not exist.`);
+    }
+    const items = current.items.filter((_, idx) => idx !== index);
+    const timestamp = profileTimestamp(current, now);
+    const { bytes } = await commitProfile({ version: PROFILE_VERSION, updatedAt: timestamp, items }, path);
+    return { ok: true, action: 'removed', id, count: items.length, maxItems: MAX_PROFILE_ITEMS, bytes, maxBytes: MAX_PROFILE_BYTES, path };
+  });
 }
 
 /** Format the bounded local Profile as deterministic Markdown for human review or cross-agent export. */

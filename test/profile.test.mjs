@@ -248,6 +248,21 @@ test('prepare injects profile into context.statements covered by approvedHash wi
   }
 });
 
+test('independent CLI workers preserve different Profile slots', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'zesia-profile-concurrent-'));
+  const path = join(dir, 'profile.json');
+  const env = { ...process.env, ZESIA_PROFILE: path, ZESIA_STATE_DIR: join(dir, 'state') };
+  try {
+    const ids = ['p1', 'p2', 'p3', 'p4', 'p5'];
+    await Promise.all(ids.map(id => execute(process.execPath, [
+      CLI_PATH, 'profile', 'set', id, 'Preserve ' + id, '--quote', 'Keep rule ' + id,
+    ], { env })));
+    assert.deepEqual((await readProfile(path)).items.map(item => item.id).sort(), ids);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('bridge /bridge/v1/view exposes injected statements & profile and POST /bridge/v1/profile distills user statements safely', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'zesia-profile-bridge-'));
   const profilePath = join(dir, 'profile.json');
@@ -256,9 +271,11 @@ test('bridge /bridge/v1/view exposes injected statements & profile and POST /bri
     { path: profilePath }
   );
 
+  let inferenceCalls = 0;
   const runtime = createPortable({
     stateDir: dir,
     profilePath,
+    consult: async () => { inferenceCalls++; throw new Error('Unexpected consultation'); },
     configuration: async () => ({ url: 'https://api.zesia.dev', token: 'synthetic-bridge-token-123456789012345' }),
   });
 
@@ -306,44 +323,22 @@ test('bridge /bridge/v1/view exposes injected statements & profile and POST /bri
     assert.equal(viewData.packet.context.statements.length, 3);
     assert.equal(viewData.packet.context.statements[2].sourceRef, 'zesia:profile:p1');
 
-    // Reject agent_inference or missing sourceQuote over bridge.
-    const inferRes = await fetch(`${origin}/bridge/v1/profile`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        protocolVersion: 1,
-        id: 'p2',
-        text: 'Agent inferred rule',
-        sourceQuote: 'Even with text',
-        origin: 'agent_inference',
-      }),
+    assert.equal(viewData.profileWriteVersion, 1);
+    const save = (payload) => fetch(`${origin}/bridge/v1/profile`, {
+      method: 'POST', headers, body: JSON.stringify(payload),
     });
-    assert.equal(inferRes.status, 400);
+    const request = { protocolVersion: 1, id: 'p2', expectedUpdatedAt: null, statementId: 'u2' };
+    for (const payload of [
+      { ...request, statementId: 'different-draft-statement' },
+      { ...request, statementId: 'a1' },
+      { ...request, statementId: 'profile:p1' },
+      { ...request, text: 'A caller-supplied substitute' },
+      { ...request, sourceQuote: 'A caller-supplied substitute' },
+      { protocolVersion: 1, id: 'p2' },
+    ]) assert.equal((await save(payload)).status, 400);
+    assert.equal((await readProfile(profilePath)).items.length, 1);
 
-    const noQuoteRes = await fetch(`${origin}/bridge/v1/profile`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        protocolVersion: 1,
-        id: 'p2',
-        text: 'Missing quote rule',
-        sourceQuote: '',
-      }),
-    });
-    assert.equal(noQuoteRes.status, 400);
-
-    // Save verified user_statement constraint into local profile.json without changing draft approvedHash.
-    const saveRes = await fetch(`${origin}/bridge/v1/profile`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        protocolVersion: 1,
-        id: 'p2',
-        text: 'Never mutate approvedHash on profile save',
-        sourceQuote: '不绕过审阅窗的显式批准边界',
-        origin: 'user_statement',
-      }),
-    });
+    const saveRes = await save(request);
     assert.equal(saveRes.status, 200);
     const afterSave = await saveRes.json();
     assert.equal(afterSave.approvedHash, prepared.approvedHash);
@@ -353,6 +348,11 @@ test('bridge /bridge/v1/view exposes injected statements & profile and POST /bri
     const storedProfile = await readProfile(profilePath);
     assert.equal(storedProfile.items.length, 2);
     assert.equal(storedProfile.items[1].sourceQuote, '不绕过审阅窗的显式批准边界');
+    assert.equal((await save(request)).status, 400, 'a previously empty slot cannot be overwritten silently');
+    const replaced = await save({ ...request, expectedUpdatedAt: storedProfile.items[1].updatedAt });
+    assert.equal(replaced.status, 200);
+    assert.equal((await save({ ...request, expectedUpdatedAt: storedProfile.items[1].updatedAt })).status, 400);
+    assert.equal(inferenceCalls, 0);
   } finally {
     session.close();
     await rm(dir, { recursive: true, force: true });
