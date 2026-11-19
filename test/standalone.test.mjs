@@ -10,9 +10,12 @@ import {fileURLToPath} from 'node:url';
 const execute=promisify(execFile);
 const binary=process.env.ZESIA_NATIVE_TEST_BIN;
 
-test('standalone installation, online review, official A2A and agent result require no Node on PATH',{skip:!binary},async()=>{
+for (const streaming of [false, true]) {
+test('standalone '+(streaming?'streaming':'non-streaming')+' installation, online review and handback require no Node on PATH',{skip:!binary},async()=>{
  const directory=await mkdtemp(join(tmpdir(),'zesia-no-node-'));let remote,bridgePid,calls=0,last;
  const extension=process.platform==='win32'?'.exe':'';
+ let finish;
+ const finishGate=new Promise(resolve=>{finish=resolve;});
  try{
   const source=join(directory,'source'),project=join(directory,'project'),config=join(directory,'private-config.json');
   await mkdir(join(source,'scripts'),{recursive:true});await mkdir(project);await writeFile(join(project,'.env'),'ZESIA_URL=https://example.invalid/untrusted-env\n');
@@ -25,16 +28,35 @@ test('standalone installation, online review, official A2A and agent result requ
   await writeFile(join(source,'host.json'),JSON.stringify(host));
   remote=createServer(async(req,res)=>{
    const url=new URL(req.url,'http://localhost');res.setHeader('content-type','application/json');
+   if(url.pathname==='/.well-known/agent-card.json'){
+    res.end(JSON.stringify({ capabilities:{streaming:true},supportedInterfaces:[{
+     url:'http://127.0.0.1:'+remote.address().port+'/a2a',protocolBinding:'JSONRPC',protocolVersion:'1.0',
+    }] }));return;
+   }
    if(url.pathname==='/v1/consult/preflight'){res.end(JSON.stringify({format:'zesia.consult.preflight.v1',ok:true,modelCalls:0}));return;}
    if(url.pathname.startsWith('/v1/consult/requests/')){res.end(JSON.stringify(last?{requestId:last.requestId,state:'completed',result:last}:{requestId:url.pathname.split('/').at(-1),state:'running'}));return;}
    assert.equal(req.headers.authorization,'Bearer synthetic-standalone-token');
    assert.match(req.headers['x-zesia-request-id'],/^zrq-\d{13}-/);
    let raw='';for await(const chunk of req)raw+=chunk;const rpc=JSON.parse(raw);calls++;
-   last={format:'zesia.consult.v0',requestId:req.headers['x-zesia-request-id'],consultId:'standalone-one',advice:'Independent synthetic review',deliveryKind:'opinion',qualityStatus:'partial',a2a:{contextId:'standalone-context'}};
+   last={format:'zesia.consult.v0',requestId:req.headers['x-zesia-request-id'],consultId:'standalone-one',advice:'Independent synthetic review',deliveryKind:'opinion',qualityStatus:'partial',a2a:{contextId:'standalone-context',messageId:'standalone-reply'}};
+   if(streaming){
+    assert.equal(rpc.method,'SendStreamingMessage');
+    const binding={taskId:last.requestId,contextId:last.a2a.contextId};
+    res.setHeader('content-type','text/event-stream');
+    const emit=value=>res.write('data: '+JSON.stringify({jsonrpc:'2.0',id:rpc.id,result:value})+'\n\n');
+    emit({task:{id:binding.taskId,contextId:binding.contextId,status:{state:'TASK_STATE_SUBMITTED'}}});
+    emit({artifactUpdate:{...binding,artifact:{artifactId:'recommendation-preview',parts:[{text:'Early synthetic preview'}]}}});
+    await finishGate;
+    emit({artifactUpdate:{...binding,lastChunk:true,artifact:{artifactId:'consult-result',parts:[{data:last,mediaType:'application/vnd.zesia.consult+json'}]}}});
+    emit({statusUpdate:{...binding,status:{state:'TASK_STATE_COMPLETED'}}});
+    res.end();
+    return;
+   }
+   assert.equal(rpc.method,'SendMessage');
    res.end(JSON.stringify({jsonrpc:'2.0',id:rpc.id,result:{message:{messageId:'standalone-reply',contextId:'standalone-context',role:'ROLE_AGENT',parts:[{data:last,mediaType:'application/vnd.zesia.consult+json'}]}}}));
   });await new Promise(resolve=>remote.listen(0,'127.0.0.1',resolve));
   const emptyPath=join(directory,'empty-path');await mkdir(emptyPath);
-  const env={...process.env,PATH:process.platform==='win32'?process.env.SystemRoot+'\\System32':emptyPath,ZESIA_CONFIG:config,ZESIA_STATE_DIR:join(directory,'state')};
+  const env={...process.env,PATH:process.platform==='win32'?process.env.SystemRoot+'\\System32':emptyPath,ZESIA_CONFIG:config,ZESIA_STATE_DIR:join(directory,'state'),ZESIA_CONSULT_STREAMING:streaming?'enabled':''};
   // All executable calls use direct paths. No system Node, Bun or global PATH setup.
   if(process.platform!=='win32')await assert.rejects(execute('/bin/sh',['-c','command -v node'],{env}));
   const sourceExe=join(source,'scripts/zesia'+extension);
@@ -51,10 +73,22 @@ test('standalone installation, online review, official A2A and agent result requ
   const headers={origin:'https://zesia.dev',authorization:'Bearer '+params.get('key'),'content-type':'application/json'};
   const view=await(await fetch(local+'/bridge/v1/view',{headers})).json();assert.equal(calls,0);assert.ok(!JSON.stringify(view).includes('synthetic-standalone-token'));
   await fetch(local+'/bridge/v1/approve',{method:'POST',headers,body:JSON.stringify({draftId:view.draftId,requestId:view.requestId,approvedHash:view.approvedHash,destination:view.destination,protocolVersion:1})});
+  if(streaming){
+   let preview;
+   for(let i=0;i<80;i++){
+    preview=(await(await fetch(local+'/bridge/v1/status?compact=1',{headers})).json()).streamPreview;
+    if(preview)break;
+    await new Promise(resolve=>setTimeout(resolve,50));
+   }
+   assert.equal(preview,'Early synthetic preview');
+   assert.equal(calls,1);
+   finish();
+  }
   const result=JSON.parse((await execute(exe,['wait',prepared.draftId,'10'],{env,timeout:15000})).stdout);
   assert.equal(result.consultId,'standalone-one');assert.equal(calls,1);
   assert.equal(typeof(await(await fetch(local+'/bridge/v1/status',{headers})).json()).agentReceivedAt,'number');
  }finally{
+  finish();
   if(bridgePid){
    try{process.kill(bridgePid,'SIGTERM');}catch{}
    // Windows keeps a running executable locked until process termination settles.
@@ -67,3 +101,4 @@ test('standalone installation, online review, official A2A and agent result requ
   await rm(directory,{recursive:true,force:true,maxRetries:20,retryDelay:100});
  }
 });
+}
