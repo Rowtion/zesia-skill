@@ -69,15 +69,58 @@ test('cancel persists and does not call preflight or cloud inference',async()=>{
  const s=await setup();try{await s.request('cancel',s.approval);assert.equal((await(await s.request('status')).json()).status,'cancelled');await s.request('approve',s.approval);assert.equal(s.counts().calls,0);}finally{await s.close();}
 });
 
-test('lost response recovers from cloud by the same request ID without another inference',async()=>{
- const directory=await mkdtemp(join(tmpdir(),'zesia-online-recover-'));let calls=0,reads=0,id;
+test('a new review bridge reports the saved run in progress and recovers the same result',async()=>{
+ const directory=await mkdtemp(join(tmpdir(),'zesia-online-recover-'));
+ let calls=0,requestId,session,clock=Date.now(),cloudState='running';
+ const options={
+  stateDir:directory,
+  now:()=>clock,
+  configuration:async()=>({url:'https://api.zesia.dev',token:'fixture-token'}),
+  consult:async args=>{calls++;requestId=args.requestId;throw Error('Lost response');},
+  recover:async args=>{
+   assert.equal(args.requestId,requestId);
+   if(cloudState==='unavailable')throw Error('Status unavailable');
+   if(cloudState!=='completed')return {state:cloudState,requestId};
+   return {state:'completed',requestId,result:{
+    format:'zesia.consult.v0',requestId,consultId:'saved',advice:'Recovered actual opinion',
+    a2a:{contextId:'same',messageId:'original-reply'},
+   }};
+  },
+ };
  try{
-  const runtime=createPortable({stateDir:directory,configuration:async()=>({url:'https://api.zesia.dev',token:'private-token'}),preflight:async()=>({ok:true}),
-   consult:async args=>{calls++;id=args.requestId;throw Error('Lost response');},recover:async args=>{reads++;assert.equal(args.requestId,id);return {state:'completed',requestId:id,result:{format:'zesia.consult.v0',requestId:id,consultId:'saved',advice:'Recovered actual opinion',a2a:{contextId:'same'}}};}});
-  const prepared=await runtime.prepare(packet);await runtime.send(prepared.draftId,prepared.approvedHash,'User approved in the window.');
-  const result=await runtime.result(prepared.draftId);assert.equal(result.consultId,'saved');assert.equal(calls,1);assert.equal(reads,1);
-  await runtime.send(prepared.draftId,prepared.approvedHash,'User approved.');assert.equal(calls,1);
- }finally{await rm(directory,{recursive:true,force:true});}
+  const original=createPortable(options);
+  const prepared=await original.prepare(packet);
+  await original.send(prepared.draftId,prepared.approvedHash,'Test approval for the original draft.');
+  assert.equal(requestId,prepared.requestId);
+  const runtime=createPortable(options);
+  session=await startOnlineReview({runtime,draftId:prepared.draftId});
+  const params=new URLSearchParams(new URL(session.url).hash.slice(1));
+  const headers={origin:'https://zesia.dev',authorization:'Bearer '+params.get('key')};
+  const read=async path=>(await fetch('http://127.0.0.1:'+session.port+'/bridge/v1/'+path,{headers})).json();
+
+  const view=await read('view');
+  assert.equal(view.requestId,requestId);
+  assert.equal(view.requestInProgress,true);
+  assert.equal((await read('status')).requestInProgress,true);
+  const compact=await read('status?compact=1');
+  assert.equal(compact.requestInProgress,true);
+  assert.equal(Object.hasOwn(compact,'packet'),false);
+
+  for(const state of ['unknown','unavailable']){
+   cloudState=state;clock+=2000;
+   const status=await read('status');
+   assert.equal(status.status,'unknown');
+   assert.equal(status.requestInProgress,false);
+  }
+  cloudState='completed';clock+=2000;
+  const completed=await read('view');
+  assert.equal(completed.status,'completed');
+  assert.equal(completed.requestInProgress,false);
+  assert.equal(completed.rawResult.requestId,requestId);
+  assert.equal(completed.rawResult.a2a.messageId,'original-reply');
+  assert.deepEqual((await runtime.result(prepared.draftId)).a2a,completed.rawResult.a2a);
+  assert.equal(calls,1);
+ }finally{session?.close();await rm(directory,{recursive:true,force:true});}
 });
 
 test('bridge configure saves activation token locally and flips configured from false to true',async()=>{
