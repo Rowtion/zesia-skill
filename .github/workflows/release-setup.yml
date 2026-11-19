@@ -1,0 +1,61 @@
+name: Publish official setup
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type release-setup to publish the tested setup artifacts
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: official-setup-release
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'release-setup'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, macos-15-intel, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - run: npm ci --ignore-scripts
+      - run: node setup/build.mjs --native
+      - run: node --test test/setup.test.mjs
+        env:
+          ZESIA_TEST_SETUP_NATIVE: '1'
+      - if: matrix.os == 'ubuntu-24.04'
+        run: node setup/build.mjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: setup-${{ matrix.os }}
+          path: |
+            dist/setup/*.zip
+            dist/setup/*.sha256
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish the independently versioned installer
+        shell: bash
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for target in darwin-arm64 darwin-x64 linux-arm64 linux-x64 win32-x64 node; do
+            sha256sum --check "zesia-setup-1.0.0-${target}.zip.sha256"
+          done
+          gh release create setup-v1.0.0 ./*.zip ./*.sha256 --target "$GITHUB_SHA" --title "Official installer 1.0.0" --latest=false --notes "Verified host setup and first-use guide. Includes Node and standalone builds."
