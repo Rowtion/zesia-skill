@@ -214,9 +214,10 @@ export function createPortable({
       const reauthRequired = Boolean(record.reauthRequired);
       if(compact)return {status:record.status,configured,reauthRequired,agentReceivedAt:await receivedAt(id),
         ...(record.result?.ok===false?{result:{message:record.result.message}}:{})};
-      const profile=await readProfile(resolvedProfilePath).catch(()=>({version:1,updatedAt:null,items:[]}));
+      const profile=await readProfile(resolvedProfilePath).catch(()=>null);
       return {ok:true,draftId:record.id,requestId:record.requestId,status:record.status,configured,reauthRequired,approvedHash:record.hash,
         destination:record.destination,packet:structuredClone(record.packet),profile,
+        ...(profile ? {} : {profileError:'The local Profile could not be read. Inspect it with zesia profile.'}),
         expiresAt:new Date(record.expiresAt).toISOString(),result:record.result || null,rawResult:record.rawResult||null,agentReceivedAt:await receivedAt(id)};
     },
     async cancel(id, approvedHash) {
