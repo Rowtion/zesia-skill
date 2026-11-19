@@ -154,7 +154,7 @@ Routing status: ${value.routeStatus}
 
 ${guidance ? 'Do not automatically retry the consultation.' : ADOPTION_INSTRUCTIONS}
 
-Blocking followUp requests: evidence -> load zesia-consult-evidence; user_decision/clarification -> load zesia-consult-decision. Use zesia_followup with this consultId, not a new consultation.
+Read blocking requests from nextAction.requests in v2 and followUp.requests in older results. For evidence -> load zesia-consult-evidence; user_decision/clarification -> load zesia-consult-decision. Use zesia_followup with this consultId, not a new consultation.
 ${fence('consultant_output', {
     advice: value.advice,
     expertMatch: consultation.expertMatch || { status: value.routeStatus, warning: 'Specialist matching not verified.' },

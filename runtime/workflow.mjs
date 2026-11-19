@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
 import { consultOverA2A, preflightConsult } from './a2a.mjs';
+import { consultFollowUpRequests } from './contract.mjs';
 import { destinationOf, readConfig, REQUESTER } from './config.mjs';
 import {
   ALLOWED_ATTACHMENT_TYPES,
@@ -158,7 +159,7 @@ export function validatePacket(packet, requester = REQUESTER) {
 }
 
 function validateAnswers(parent, answers) {
-  const requests = parent.result.followUp?.requests || [];
+  const requests = consultFollowUpRequests(parent.result);
   if (!Array.isArray(answers) || !answers.length || answers.length > 3) throw new Error('Answer one to three actual consultant requests.');
   const seen = new Set();
   return answers.map(answer => {
@@ -464,7 +465,7 @@ export function createWorkflow({
       round: record.round,
       maxRounds: MAX_ROUNDS,
       consumed: record.consumed,
-      followUp: record.result.followUp?.requests || [],
+      followUp: consultFollowUpRequests(record.result),
       previousAdvice: record.result.decision?.recommendation
         ? [record.result.decision.recommendation]
         : [],

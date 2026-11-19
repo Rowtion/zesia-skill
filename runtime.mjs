@@ -15,6 +15,7 @@ import {
   setProfileItem,
 } from './runtime/profile.mjs';
 import { runtimeVersion } from './runtime/standalone.mjs';
+import { CONSULT_RESULT_V2, consultFollowUpRequests } from './runtime/contract.mjs';
 
 export function portableEnvironment(env = process.env) {
   return { ...env, ZESIA_CONFIG: env.ZESIA_CONFIG || join(homedir(), '.config/zesia/agent.json') };
@@ -103,6 +104,14 @@ export function createPortable({
   function present(record, cached = false) {
     if (!record.result) return { ok: false, status: record.status, code: record.status === 'unknown' ? 'outcome_unknown' : 'result_unavailable', hint: 'Do not resend an unknown outcome.' };
     const r = record.result;
+    const raw = record.rawResult;
+    if (raw?.resultSchemaVersion === CONSULT_RESULT_V2) {
+      return {
+        ...r, resultSchemaVersion: CONSULT_RESULT_V2, nextAction: raw.nextAction ?? null,
+        followUp: { ...r.followUp, requests: consultFollowUpRequests(raw) },
+        draftId: record.id, cached,
+      };
+    }
     return { ...r, draftId: record.id, cached };
   }
   async function stage(packet, continuation = null) {
@@ -270,7 +279,7 @@ export function createPortable({
       if (parent.status !== 'completed' || !r?.consultId || !r.a2a?.contextId) throw new Error('No completed consultation exists for this draft.');
       const round = parent.continuation?.round || 1;
       if (round >= 3) throw new Error('The three-round limit was reached.');
-      const requests = r.followUp?.requests || [];
+      const requests = consultFollowUpRequests(r);
       if (!Array.isArray(answers) || !answers.length || answers.length > 3) throw new Error('Provide one to three answers to actual consultant questions.');
       const seen = new Set();
       const checked = answers.map(answer => {
