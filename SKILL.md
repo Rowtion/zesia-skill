@@ -71,7 +71,7 @@ the reason, and the resulting next step. Keep helping the user rather than merel
 
 If ZESIA needs evidence, clarification or a user decision, collect available evidence yourself
 and ask the user only for decisions they must make. For an actual followUp question, use
-`followup <prior-draftId> <answers.json>` with the real question ID/source reference and an
+If `followUpState.stopped` is true, leave the questions unresolved and continue the original task using the available result. Otherwise use `followup <prior-draftId> <answers.json>` with the real question ID/source reference and an
 exact user quote for a user decision. Then review the new draft and wait again. Each round
 has a new request ID and a fresh approval, preserving the actual A2A contextId. Do not invent
 answers or treat send confirmation as factual verification or a substantive user decision.
