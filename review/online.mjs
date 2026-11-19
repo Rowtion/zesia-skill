@@ -54,7 +54,7 @@ export async function startOnlineReview({runtime,draftId,onlineOrigin='https://z
    }
    if(initial.status==='onboarding'&&req.method==='POST'&&req.url!=='/bridge/v1/configure')
     return reply(res,404,{ok:false,message:'Only sign-in is available in the installation guide.'});
-   if(req.method!=='POST'||!['/bridge/v1/approve','/bridge/v1/cancel','/bridge/v1/configure','/bridge/v1/profile'].includes(req.url))return reply(res,404,{ok:false,message:'Unknown bridge operation.'});
+   if(req.method!=='POST'||!['/bridge/v1/approve','/bridge/v1/cancel','/bridge/v1/configure','/bridge/v1/profile','/bridge/v1/stop-follow-up'].includes(req.url))return reply(res,404,{ok:false,message:'Unknown bridge operation.'});
    const input=await body(req);
    if(req.url==='/bridge/v1/profile'){
     if(!input||Array.isArray(input)||Object.keys(input).sort().join(',')!==profileKeys.join(',')
@@ -92,8 +92,17 @@ export async function startOnlineReview({runtime,draftId,onlineOrigin='https://z
    if(!input||Array.isArray(input)||Object.keys(input).sort().join(',')!==approvalKeys.join(','))return reply(res,400,{ok:false,message:'Only the exact reviewed approval is accepted.'});
    const current=await runtime.inspect(draftId);
    if(input.protocolVersion!==ONLINE_PROTOCOL||input.draftId!==draftId||input.requestId!==current.requestId||input.approvedHash!==current.approvedHash||input.destination!==current.destination)return reply(res,409,{ok:false,message:'The reviewed request changed. Nothing new was sent.'});
+   if(req.url==='/bridge/v1/stop-follow-up'){
+    if(typeof runtime.stopFollowUp!=='function')return reply(res,501,{ok:false,message:'Stopping further rounds is not supported by this runtime.'});
+    if(!current.followUpState?.canStop&&!current.followUpState?.stopped)
+     return reply(res,409,{ok:false,message:'There are no further rounds to stop in this review.'});
+    const followUpState=await runtime.stopFollowUp(draftId);
+    return reply(res,200,{ok:true,followUpState});
+   }
    if(busy)return reply(res,202,{ok:true,status:'sending',requestId:current.requestId,requestInProgress:true});
    if(current.status!=='prepared')return reply(res,200,await view());
+   if(req.url==='/bridge/v1/approve'&&current.followUpState?.stopped)
+    return reply(res,409,{ok:false,message:'Further rounds are stopped. This draft was not sent.'});
    if(Date.now()>Date.parse(current.expiresAt))return reply(res,410,{ok:false,message:'These materials expired. Ask your agent to prepare a new review.'});
    if(req.url==='/bridge/v1/cancel')return reply(res,200,await runtime.cancel(draftId,input.approvedHash));
    busy=true;lastError=null;
