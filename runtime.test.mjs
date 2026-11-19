@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, readFile, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createPortable } from './runtime.mjs';
@@ -21,6 +21,36 @@ test('send refuses missing confirmation and a changed reviewed hash before any n
 test('concurrent requests claim one send and recover a compact local result without resending',async()=>{
  const f=await fixture(),d=await f.runtime.prepare(packet);const results=await Promise.all([f.runtime.send(d.draftId,d.approvedHash,'Send.'),f.runtime.send(d.draftId,d.approvedHash,'Send.')]);assert.equal(f.counts().calls,1);assert.ok(results.some(r=>r.ok));const r=await f.runtime.result(d.draftId);assert.equal(r.cached,true);assert.equal(r.decision.assessment,'Full independent advice.');assert.equal(r.packet,undefined);assert.equal(r.advice,'Full independent advice.');await f.runtime.send(d.draftId,d.approvedHash,'Send.');assert.equal(f.counts().calls,1);
 });
+test('v2 handback and repeat reads preserve the canonical next action and use its questions', async t => {
+ const nextAction = {
+  kind: 'ask_user_decision', blocking: true,
+  requests: [{ id: 'current', kind: 'user_decision', question: 'Which option did you choose?', blocking: true }],
+  escalation: { kind: 'more_context', reason: 'Need a user decision.' },
+ };
+ const f = await fixture({
+  consult: async () => ({
+   format: 'zesia.consult.v0', resultSchemaVersion: 'zesia.consult.result.v2',
+   consultId: 'canonical', advice: 'Await the choice.', a2a: { contextId: 'ctx-v2', messageId: 'message-v2' },
+   nextAction, followUp: { requests: [{ id: 'legacy', kind: 'evidence', question: 'Outdated projection.' }] },
+  }),
+ });
+ t.after(() => rm(f.stateDir, { recursive: true, force: true }));
+ const prepared = await f.runtime.prepare(packet);
+ const first = await f.runtime.send(prepared.draftId, prepared.approvedHash, 'Approve fixture.');
+ const read = await f.runtime.result(prepared.draftId);
+ for (const result of [first, read]) {
+  assert.equal(result.resultSchemaVersion, 'zesia.consult.result.v2');
+  assert.deepEqual(result.nextAction, nextAction);
+  assert.deepEqual(result.followUp.requests, nextAction.requests);
+  assert.equal(result.a2a.messageId, 'message-v2');
+ }
+ await assert.rejects(f.runtime.followup(prepared.draftId, [{requestId:'legacy',text:'A',sourceRef:'fixture:1'}]), /Unknown or duplicate/);
+ await assert.rejects(f.runtime.followup(prepared.draftId, [{requestId:'current',text:'A',sourceRef:'fixture:1'}]), /quote their answer/);
+ const draft=await f.runtime.followup(prepared.draftId,[{requestId:'current',text:'A',sourceRef:'fixture:1',sourceQuote:'Choose A.'}]);
+ assert.equal(draft.packet.context.continuation.answers[0].question, 'Which option did you choose?');
+ assert.equal(draft.networkCalls, 0);
+});
+
 test('follow-up carries original evidence and advice on the actual A2A context and requires another approval',async()=>{
  const f=await fixture(),d=await f.runtime.prepare(packet);await f.runtime.send(d.draftId,d.approvedHash,'Send.');const next=await f.runtime.followup(d.draftId,[{requestId:'q1',text:'Conditional create is atomic.',sourceRef:'tool:read'}]);assert.equal(next.packet.context.continuation.round,2);assert.equal(next.packet.context.continuation.answers[0].sourceQuote,'');assert.equal(next.packet.context.previousAdvice[0],'Full independent advice.');assert.equal(f.counts().calls,1);const r=await f.runtime.send(next.draftId,next.approvedHash,'Send the supplement.');assert.equal(r.a2a.contextId,'same-context');await assert.rejects(f.runtime.followup(d.draftId,[{requestId:'q1',text:'again',sourceRef:'tool:read'}]),/already exists/);
 });
