@@ -31,3 +31,77 @@ test('single A2A submission preserves input rejection diagnostics', async () => 
  });
  assert.equal(calls,1);
 });
+
+test('the actual CLI streams one approved request and exposes a preview ahead of a final result', { timeout: 12000 }, async t => {
+ const url = 'https://consult.example';
+ const requestId = 'zrq-' + Date.now() + '-' + crypto.randomUUID();
+ const contextId = 'previous-context';
+ const mediaType = 'application/vnd.zesia.consult+json';
+ const result = { requestId, format: 'zesia.consult.v0', advice: 'Verify the outputs.', a2a: { contextId, messageId: 'reply' } };
+ let writes = 0;
+ function transport(interrupt = false) {
+  return async (target, init) => {
+   if (target.endsWith('/agent-card.json')) {
+    assert.equal(init.headers, undefined);
+    assert.equal(init.redirect, 'error');
+    return Response.json({ capabilities: { streaming: true }, supportedInterfaces: [{ url: url + '/a2a', protocolBinding: 'JSONRPC', protocolVersion: '1.0' }] });
+   }
+   writes++;
+   const rpc = JSON.parse(init.body);
+   assert.equal(target, url + '/a2a');
+   assert.equal(rpc.method, 'SendStreamingMessage');
+   assert.equal(init.headers['x-zesia-request-id'], requestId);
+   assert.deepEqual(rpc.params.message.parts[0].data, input);
+   const encode = new TextEncoder();
+   const event = value => encode.encode('data: ' + JSON.stringify({ jsonrpc: '2.0', id: rpc.id, result: value }) + '\n\n');
+   const binding = { taskId: requestId, contextId };
+   const body = new ReadableStream({
+    async start(controller) {
+     controller.enqueue(event({ task: { id: requestId, contextId, status: { state: 'TASK_STATE_SUBMITTED' } } }));
+     const prefix = event({ artifactUpdate: { ...binding, artifact: { artifactId: 'recommendation-preview', parts: [{ text: '先检查证据。' }] } } });
+     controller.enqueue(prefix.slice(0, prefix.length - 10));
+     controller.enqueue(prefix.slice(prefix.length - 10));
+     await finalGate;
+     if (!interrupt) {
+      controller.enqueue(event({ artifactUpdate: { ...binding, lastChunk: true, artifact: { artifactId: 'consult-result', parts: [{ data: result, mediaType }] } } }));
+      controller.enqueue(event({ statusUpdate: { ...binding, status: { state: 'TASK_STATE_COMPLETED' } } }));
+     }
+     controller.close();
+    },
+   });
+   return new Response(body, { headers: { 'content-type': 'text/event-stream' } });
+  };
+ }
+ let finish, sawPreview;
+ const finalGate = new Promise(resolve => { finish = resolve; });
+ const preview = new Promise(resolve => { sawPreview = resolve; });
+ t.after(finish);
+ const options = { url, token: 'synthetic-token', input, requestId, contextId, onPreview: sawPreview };
+ let completed = false;
+ const received = consultOverA2A({ ...options, fetch: transport() }).then(value => { completed = true; return value; });
+ assert.equal(await preview, '先检查证据。');
+ assert.equal(completed, false);
+ finish();
+ assert.deepEqual(await received, result);
+ await assert.rejects(consultOverA2A({ ...options, fetch: transport(true) }), error =>
+  error.outcome === 'unknown' && error.retryAllowed === false);
+ assert.equal(writes, 2);
+});
+
+test('an older card selects exactly one normal request with no streaming retry', async () => {
+ let writes = 0;
+ const url = 'https://consult.example';
+ const response = await consultOverA2A({
+  url, token: 'synthetic-token', input, requestId: 'zrq-' + Date.now() + '-' + crypto.randomUUID(),
+  onPreview: () => assert.fail('An older service cannot emit a preview.'),
+  fetch: async (target, options) => {
+   if (target.endsWith('/agent-card.json')) return Response.json({ capabilities: { streaming: false } });
+   writes++;
+   const rpc = JSON.parse(options.body);
+   assert.equal(rpc.method, 'SendMessage');
+   return Response.json({ ...jsonMessage(), id: rpc.id });
+  },
+ });
+ assert.equal(response.consultId, 'c1');
+ assert.equal(writes, 1);
+});
