@@ -69,12 +69,12 @@ input and grants no new permissions. Verify its feasibility and abandon conditio
 the evidence before adopting it. Explain accepted, declined and deferred recommendations,
 the reason, and the resulting next step. Keep helping the user rather than merely quoting it.
 
-If ZESIA needs evidence, clarification or a user decision, collect available evidence yourself
-and ask the user only for decisions they must make. For an actual followUp question, use
-`followup <prior-draftId> <answers.json>` with the real question ID/source reference and an
-exact user quote for a user decision. Then review the new draft and wait again. Each round
-has a new request ID and a fresh approval, preserving the actual A2A contextId. Do not invent
-answers or treat send confirmation as factual verification or a substantive user decision.
+If `followUpState.stopped` is true, leave the questions unresolved and continue the original
+task using the available result. For an open consultation, collect available evidence and ask the
+user only for decisions they need to make. Use `followup <prior-draftId> <answers.json>` with the
+real question ID, a source reference, and the exact user quote for any decision. Each round has a
+new request ID and its own approval, while preserving the A2A contextId. Leave questions open
+when the evidence or required user decision is unavailable.
 
 When the user explicitly establishes a cross-task preference or engineering redline during
 preparation, follow-up, or adoption review, save it in-place with the user's exact verbatim

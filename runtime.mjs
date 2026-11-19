@@ -116,9 +116,27 @@ export function createPortable({
     }
     return { ...r, draftId: record.id, cached };
   }
-  async function stage(packet, continuation = null) {
+  function stopMarker(record) {
+    const contextId = record.continuation?.contextId || record.rawResult?.a2a?.contextId;
+    if (!contextId) return null;
+    return join(stateDir, 'stopped-' + hash([record.destination, contextId]));
+  }
+  async function followUpState(record) {
+    const marker = stopMarker(record);
+    const stopped = marker ? await lstat(marker).then(() => true, error => {
+      if (error.code === 'ENOENT') return false;
+      throw error;
+    }) : false;
+    const round = record.continuation?.round || 1;
+    const canStop = !stopped && Boolean(marker) && record.status === 'completed' && round < 3
+      && consultFollowUpRequests(record.rawResult).length > 0;
+    return { stopped, round, maxRounds: 3, canStop };
+  }
+  async function stage(packet, continuation = null, expectedDestination = null) {
     check(packet);
     const config = await configuration();
+    if (expectedDestination && destinationOf(config.url) !== expectedDestination)
+      throw new Error('The consultation destination changed. Start a separate consultation to use it.');
     const record = { id: randomUUID(), requestId: 'zrq-'+now()+'-'+randomUUID(), status: 'prepared', packet: structuredClone(packet), hash: hash(packet),
       destination: destinationOf(config.url), expiresAt: now()+15*60*1000, continuation };
     await store(record);
@@ -163,6 +181,13 @@ export function createPortable({
       catch (error) { if (error.code === 'EEXIST') return { ok: false, code: 'send_already_claimed', hint: 'Read the local result; do not resend.' }; throw error; }
       await claim.close();
       try {
+        if (record.continuation && (await followUpState(record)).stopped) {
+          record.status = 'cancelled';
+          record.result = { ok: false, status: 'cancelled', code: 'cancelled',
+            message: 'Further rounds are stopped. This draft was not sent.', outcome: 'not_started', retryAllowed: false };
+          await store(record);
+          return present(record);
+        }
         record.approval={hash:record.hash,requestId:record.requestId,destination:record.destination,confirmation:confirmation.trim(),at:now()};
         record.status = 'unknown'; await store(record);
         const response = await consult({ url: config.url, token: config.token, input: record.packet,
@@ -225,16 +250,17 @@ export function createPortable({
       const config = await configuration().catch(() => null);
       const configured = Boolean(config?.token);
       const reauthRequired = Boolean(record.reauthRequired);
+      const rounds = await followUpState(record);
       const preview = previews.get(id);
       const progress = streaming ? {
         streamPreviewVersion: 1,
         ...(record.status==='unknown' && preview ? { streamPreview: preview } : {}),
       } : {};
-      if(compact)return {status:record.status,...progress,configured,reauthRequired,agentReceivedAt:await receivedAt(id),
+      if(compact)return {status:record.status,...progress,configured,reauthRequired,agentReceivedAt:await receivedAt(id),followUpState:rounds,
         ...(record.result?.ok===false?{result:{message:record.result.message}}:{})};
       const profile=await readProfile(resolvedProfilePath).catch(()=>null);
       return {ok:true,draftId:record.id,requestId:record.requestId,status:record.status,...progress,configured,reauthRequired,approvedHash:record.hash,
-        destination:record.destination,packet:structuredClone(record.packet),profile,
+        destination:record.destination,packet:structuredClone(record.packet),profile,followUpState:rounds,
         ...(profile ? {} : {profileError:'The local Profile could not be read. Inspect it with zesia profile.'}),
         expiresAt:new Date(record.expiresAt).toISOString(),result:record.result || null,rawResult:record.rawResult||null,agentReceivedAt:await receivedAt(id)};
     },
@@ -245,6 +271,16 @@ export function createPortable({
       await claim.close();
       record.status='cancelled';record.result={ok:false,status:'cancelled',code:'cancelled',message:'Cancelled before sending. Nothing was sent.',outcome:'not_started',retryAllowed:false};
       await store(record);return present(record);
+    },
+    async stopFollowUp(id) {
+      const record = await read(id);
+      const current = await followUpState(record);
+      if (current.stopped) return current;
+      if (!current.canStop) throw Error('There are no further rounds to stop in this review.');
+      await writeFile(stopMarker(record), '', { flag: 'wx', mode: 0o600 }).catch(error => {
+        if (error.code !== 'EEXIST') throw error;
+      });
+      return followUpState(record);
     },
     recover: recoverResult,
     async result(id,{markReceived=false}={}) {
@@ -258,7 +294,7 @@ export function createPortable({
           if(config?.url&&config?.token)await ack({url:config.url,token:config.token,requestId:record.requestId,signal:AbortSignal.timeout(5000)}).catch(()=>false);
         }
       }
-      return {...(record.status!=='completed'&&recovered?.pending?recovered:present(record,true)),agentReceivedAt:await receivedAt(id)};
+      return {...(record.status!=='completed'&&recovered?.pending?recovered:present(record,true)),agentReceivedAt:await receivedAt(id),followUpState:await followUpState(record)};
     },
     async diagnose(id) {
       const record = await read(id);
@@ -288,6 +324,7 @@ export function createPortable({
       if (parent.status !== 'completed' || !r?.consultId || !r.a2a?.contextId) throw new Error('No completed consultation exists for this draft.');
       const round = parent.continuation?.round || 1;
       if (round >= 3) throw new Error('The three-round limit was reached.');
+      if ((await followUpState(parent)).stopped) throw new Error('Further rounds were stopped by the user.');
       const requests = consultFollowUpRequests(r);
       if (!Array.isArray(answers) || !answers.length || answers.length > 3) throw new Error('Provide one to three answers to actual consultant questions.');
       const seen = new Set();
@@ -306,7 +343,10 @@ export function createPortable({
       check(packet);
       const claim = await open(path(id)+'.followup', 'wx', 0o600).catch(error => { if (error.code === 'EEXIST') throw new Error('A follow-up already exists for this result. Do not duplicate it.'); throw error; });
       await claim.close();
-      try { return await stage(packet, { contextId: r.a2a.contextId, round: round+1 }); }
+      try {
+        if ((await followUpState(parent)).stopped) throw new Error('Further rounds were stopped by the user.');
+        return await stage(packet, { contextId: r.a2a.contextId, previousRequestId: parent.requestId, round: round+1 }, parent.destination);
+      }
       catch (error) { await unlink(path(id)+'.followup'); throw error; }
     },
     async list({ retentionDays = 7 } = {}) {

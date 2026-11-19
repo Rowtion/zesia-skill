@@ -263,3 +263,81 @@ test('concurrent configure across runtime instances cannot delete active send cl
   await rm(directory,{recursive:true,force:true});
  }
 });
+
+test('a user can stop future rounds across bridges without discarding a result or cancelling an active send', async t => {
+ const dir = await mkdtemp(join(tmpdir(), 'zesia-stop-review-'));
+ t.after(() => rm(dir, { recursive: true, force: true }));
+ const question = { id: 'proof', question: 'What evidence is available?', kind: 'evidence', blocking: true };
+ let calls = 0;
+ let release;
+ let started;
+ const pending = new Promise(resolve => { release = resolve; });
+ const inFlight = new Promise(resolve => { started = resolve; });
+ t.after(release);
+ const options = {
+  stateDir: dir,
+  configuration: async () => ({ url: 'https://api.zesia.dev', token: 'fixture' }),
+  consult: async args => {
+   calls++;
+   if (args.contextId) {
+    assert.match(args.correlation.parentRequestId, /^zrq-/);
+    started();
+    await pending;
+   }
+   return { consultId: args.requestId, advice: 'Fixture opinion',
+    a2a: { contextId: args.contextId || args.requestId }, followUp: { requests: [question] } };
+  },
+ };
+ const runtime = createPortable(options);
+ const answer = [{ requestId: question.id, text: 'The fixture passed.', sourceRef: 'fixture:test' }];
+ const send = draft => runtime.send(draft.draftId, draft.approvedHash, 'Synthetic approval');
+ const complete = async () => {
+  const draft = await runtime.prepare(packet);
+  await send(draft);
+  return draft;
+ };
+ async function browser(draft) {
+  const review = await startOnlineReview({ runtime, draftId: draft.draftId });
+  t.after(review.close);
+  const key = new URLSearchParams(new URL(review.url).hash.slice(1)).get('key');
+  const body = { protocolVersion: 1, draftId: draft.draftId, requestId: draft.requestId,
+   approvedHash: draft.approvedHash, destination: draft.destination };
+  return (path, method = 'GET', overrides = {}, headers = {}) => fetch('http://127.0.0.1:' + review.port + '/bridge/v1/' + path, {
+   method, headers: { origin: 'https://zesia.dev', authorization: 'Bearer ' + key, 'content-type': 'application/json', ...headers },
+   ...(method === 'POST' ? { body: JSON.stringify({ ...body, ...overrides }) } : {}),
+  });
+ }
+
+ const first = await complete();
+ const prepared = await runtime.followup(first.draftId, answer);
+ const firstReview = await browser(first);
+ assert.equal((await firstReview('stop-follow-up', 'POST', {}, { origin: 'https://example.com' })).status, 403);
+ assert.equal((await firstReview('stop-follow-up', 'POST', {}, { authorization: 'Bearer other' })).status, 403);
+ assert.equal((await firstReview('stop-follow-up', 'POST', { requestId: 'other' })).status, 409);
+ assert.equal((await (await firstReview('view')).json()).followUpState.canStop, true);
+ assert.equal((await (await firstReview('stop-follow-up', 'POST')).json()).followUpState.stopped, true);
+ assert.equal((await (await firstReview('stop-follow-up', 'POST')).json()).followUpState.stopped, true);
+ const restarted = createPortable(options);
+ const result = await restarted.result(first.draftId);
+ assert.equal(result.consultId, first.requestId);
+ assert.equal(result.followUp.requests[0].id, question.id);
+ assert.equal(result.followUpState.stopped, true);
+ await assert.rejects(restarted.followup(first.draftId, answer), /stopped by the user/u);
+ const preparedReview = await browser(prepared);
+ assert.equal((await preparedReview('approve', 'POST')).status, 409);
+ assert.equal((await restarted.send(prepared.draftId, prepared.approvedHash, 'Synthetic stale approval')).status, 'cancelled');
+ assert.equal(calls, 1);
+
+ const second = await complete();
+ const active = await runtime.followup(second.draftId, answer);
+ const activeSend = send(active);
+ await inFlight;
+ const secondReview = await browser(second);
+ assert.equal((await (await secondReview('view')).json()).followUpState.stopped, false);
+ await secondReview('stop-follow-up', 'POST');
+ release();
+ assert.equal((await activeSend).status, 'completed');
+ assert.equal((await restarted.result(active.draftId)).followUpState.stopped, true);
+ await assert.rejects(restarted.followup(active.draftId, answer), /stopped by the user/u);
+ assert.equal(calls, 3);
+});
