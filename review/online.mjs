@@ -8,7 +8,7 @@ const equal=(a,b)=>typeof a==='string'&&Buffer.byteLength(a)===Buffer.byteLength
 const approvalKeys=['approvedHash','destination','draftId','protocolVersion','requestId'];
 const configureKeys=['destination','protocolVersion','token'];
 const profileKeys=['id','protocolVersion','sourceQuote','text'];
-export async function startOnlineReview({runtime,draftId,onlineOrigin='https://zesia.dev',idleMs=24*60*60_000,lifetimeMs=24*60*60_000,onClose=()=>{}}){
+export async function startOnlineReview({runtime,draftId,onlineOrigin='https://zesia.dev',idleMs=24*60*60_000,lifetimeMs=24*60*60_000,onClose=()=>{},onGuideView}){
  if(!ONLINE_ORIGINS.includes(onlineOrigin))throw Error('The online review origin is not supported.');
  const initial=await runtime.inspect(draftId);
  if(!initial.requestId)throw Error('This older draft cannot use online review. Prepare and review a new draft.');
@@ -44,7 +44,13 @@ export async function startOnlineReview({runtime,draftId,onlineOrigin='https://z
    if(Date.now()-lastActivity>idleMs||(!busy&&Date.now()-started>lifetimeMs))return reply(res,410,{ok:false,message:'This review connection expired (24h limit). Reopen it from your agent.'});
    lastActivity=Date.now();
    if(req.method==='GET'&&req.url==='/bridge/v1/status?compact=1')return reply(res,200,await view(true));
-   if(req.method==='GET'&&['/bridge/v1/view','/bridge/v1/status'].includes(req.url))return reply(res,200,await view());
+   if(req.method==='GET'&&['/bridge/v1/view','/bridge/v1/status'].includes(req.url)){
+    const current=await view();
+    if(req.url==='/bridge/v1/view'&&current.status==='onboarding')await onGuideView?.();
+    return reply(res,200,current);
+   }
+   if(initial.status==='onboarding'&&req.method==='POST'&&req.url!=='/bridge/v1/configure')
+    return reply(res,404,{ok:false,message:'Only sign-in is available in the installation guide.'});
    if(req.method!=='POST'||!['/bridge/v1/approve','/bridge/v1/cancel','/bridge/v1/configure','/bridge/v1/profile'].includes(req.url))return reply(res,404,{ok:false,message:'Unknown bridge operation.'});
    const input=await body(req);
    if(req.url==='/bridge/v1/profile'){
