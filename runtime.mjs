@@ -128,7 +128,9 @@ export function createPortable({
       throw error;
     }) : false;
     const round = record.continuation?.round || 1;
-    return { stopped, round, maxRounds: 3, canStop: !stopped && Boolean(marker) && round < 3 };
+    const canStop = !stopped && Boolean(marker) && record.status === 'completed' && round < 3
+      && consultFollowUpRequests(record.rawResult).length > 0;
+    return { stopped, round, maxRounds: 3, canStop };
   }
   async function stage(packet, continuation = null, expectedDestination = null) {
     check(packet);
@@ -272,9 +274,10 @@ export function createPortable({
     },
     async stopFollowUp(id) {
       const record = await read(id);
-      const marker = stopMarker(record);
-      if (!marker) throw Error('This review is not linked to an existing consultation.');
-      await writeFile(marker, '', { flag: 'wx', mode: 0o600 }).catch(error => {
+      const current = await followUpState(record);
+      if (current.stopped) return current;
+      if (!current.canStop) throw Error('There are no further rounds to stop in this review.');
+      await writeFile(stopMarker(record), '', { flag: 'wx', mode: 0o600 }).catch(error => {
         if (error.code !== 'EEXIST') throw error;
       });
       return followUpState(record);
