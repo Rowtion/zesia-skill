@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
-import { readFile, realpath, access } from 'node:fs/promises';
+import { readFile, realpath, access, mkdir, lstat, writeFile, link, unlink } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { hosts, skillHosts } from './guide.mjs';
 
@@ -19,6 +20,42 @@ async function registeredDsh(dsh, profile) {
   if (!target || !directory) throw Error('Review the existing DSH registration before changing it.');
   return realpath(resolve(directory, target));
 }
+const consultCommands = new Map([
+  ['opencode', 'zesia-consult.md'],
+  ['gemini-cli', 'zesia-consult.toml'],
+]);
+
+async function installConsultCommand(destination, name) {
+  const source = join(destination, 'commands', name);
+  const asset = await lstat(source).catch(error => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (!asset) return 'unavailable';
+  if (!asset.isFile() || asset.nlink !== 1 || asset.size === 0 || asset.size > 16_384)
+    throw Error('The Consult command in this package is invalid.');
+
+  const scope = dirname(dirname(destination));
+  const directory = join(scope, 'commands');
+  await mkdir(directory, { mode: 0o700 }).catch(error => {
+    if (error.code !== 'EEXIST') throw error;
+  });
+  if (!(await lstat(directory)).isDirectory() || await realpath(directory) !== directory)
+    return 'preserved';
+
+  const temporary = join(directory, '.zesia-' + randomUUID() + '.tmp');
+  await writeFile(temporary, await readFile(source), { flag: 'wx', mode: 0o600 });
+  try {
+    await link(temporary, join(directory, name));
+    return 'installed';
+  } catch (error) {
+    if (error.code === 'EEXIST') return 'preserved';
+    throw error;
+  } finally {
+    await unlink(temporary);
+  }
+}
+
 export async function installHost({ host, directory, profile, dsh = 'dsh', project, upgrade, node = process.execPath }) {
   if (!Object.hasOwn(hosts, host)) throw Error('Choose a supported host.');
   if (host === 'dsh' && !['desktop', 'web'].includes(profile)) throw Error('Choose the active DSH profile.');
@@ -33,6 +70,8 @@ export async function installHost({ host, directory, profile, dsh = 'dsh', proje
     const installed = JSON.parse(invoke(binary, ['install', ...(project ? ['--project', resolve(project)] : []),
       ...(upgrade ? ['--upgrade'] : [])], true));
     if (!installed.ok || !installed.destination) throw Error('Installation did not return a destination.');
+    const command = consultCommands.get(host);
+    if (command) installed.directCommand = await installConsultCommand(installed.destination, command);
     return installed;
   }
   if (host === 'dsh') {
