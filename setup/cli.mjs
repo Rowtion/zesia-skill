@@ -6,11 +6,13 @@ import { access } from 'node:fs/promises';
 import { setTimeout as pause } from 'node:timers/promises';
 import { startGuide, hosts, paths } from './guide.mjs';
 import { installHost } from './install.mjs';
+import { installClaudeStartup } from './claude-startup.mjs';
 
 const entry = fileURLToPath(import.meta.url);
 const { values, positionals } = parseArgs({ allowPositionals: true, options: {
   locale: { type: 'string' }, profile: { type: 'string' }, dsh: { type: 'string' },
   project: { type: 'string' }, upgrade: { type: 'boolean' }, help: { type: 'boolean' }, 'no-open': { type: 'boolean' },
+  'reopen-pending': { type: 'boolean' },
 } });
 const [host, directory] = positionals;
 const locale = /^zh(?:[-_]|$)/i.test(values.locale || Intl.DateTimeFormat().resolvedOptions().locale) ? 'zh' : 'en';
@@ -44,15 +46,33 @@ function openAfterInstall() {
 try {
   if (values.help) console.log('zesia-setup <host> <verified-package-directory> [--locale zh|en] [--profile desktop|web --dsh <cli>] [--project <dir>] [--upgrade]');
   else if (host === 'serve-guide') {
-    const guide = await startGuide({ host: directory, locale,
+    const guide = await startGuide({ host: directory, locale, reopenPending: values['reopen-pending'] === true,
       ...(values['no-open'] ? { openBrowser: async () => false } : {}) });
     if (guide.close) {
       process.once('SIGTERM', guide.close); process.once('SIGINT', guide.close);
     }
     console.log(JSON.stringify({ state: guide.state, ...(guide.url ? { url: guide.url } : {}) }));
+  } else if (host === 'foreground-guide') {
+    // Claude Code's headless entrypoints also dispatch SessionStart. Unknown
+    // entrypoints keep the existing installer guide without opening a browser.
+    if (directory === 'claude-code' && process.env.CLAUDE_CODE_ENTRYPOINT === 'cli') {
+      const child = spawn(process.execPath, [entry, 'serve-guide', directory, '--locale', locale, '--reopen-pending'],
+        { detached: true, windowsHide: true, stdio: 'ignore' });
+      child.on('error', () => {});
+      child.unref();
+    }
   } else {
     if (positionals.length !== 2 || !Object.hasOwn(hosts, host)) throw Error('Provide a known host and its verified package directory.');
     const result = await installHost({ host, directory, ...values });
+    if (host === 'claude-code' && typeof ZESIA_SETUP_PRIVATE_NODE !== 'undefined') {
+      try {
+        await installClaudeStartup({ directory: result.destination, entry, interpreter: process.execPath,
+          privateInterpreter: ZESIA_SETUP_PRIVATE_NODE, locale });
+        result.foregroundGuide = { state: 'installed' };
+      } catch (error) {
+        result.foregroundGuide = { state: 'unavailable', message: error.message };
+      }
+    }
     try {
       const guide = await openAfterInstall();
       if (guide.state === 'opened' || guide.state === 'pending') {

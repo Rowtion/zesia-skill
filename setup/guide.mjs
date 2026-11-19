@@ -12,6 +12,7 @@ export const hosts = Object.freeze({
 });
 export const skillHosts = new Set(['codex', 'opencode', 'gemini-cli', 'antigravity', 'workbuddy']);
 const lifetime = 15 * 60_000;
+const guideId = /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/u;
 
 export function paths(host, env = process.env) {
   if (!Object.hasOwn(hosts, host)) throw Error('Unknown installation host.');
@@ -27,14 +28,14 @@ async function exists(path) {
 function active(record, origin) {
   try {
     const url = new URL(record.url);
-    if (!Number.isSafeInteger(record.pid) || record.pid < 1 || record.until <= Date.now() ||
+    if (!guideId.test(record.id) || !Number.isSafeInteger(record.pid) || record.pid < 1 || record.until <= Date.now() ||
         url.origin !== origin || url.pathname !== '/consult' || !url.hash) return false;
     process.kill(record.pid, 0);
     return true;
   } catch { return false; }
 }
 export async function startGuide({ host, locale, env = process.env, openBrowser = openOnlineBrowser,
-  origin = 'https://zesia.dev' }) {
+  origin = 'https://zesia.dev', reopenPending = false }) {
   const { config, marker, pending } = paths(host, env);
   if (await exists(marker)) return { state: 'seen' };
   const configEnv = { ...env, ZESIA_CONFIG: config };
@@ -65,9 +66,30 @@ export async function startGuide({ host, locale, env = process.env, openBrowser 
     try { await writeFile(marker, '', { flag: 'wx', mode: 0o600 }); }
     catch (e) { if (e.code !== 'EEXIST') throw e; }
   }
+  const browserClaim = id => pending + '.opening-' + id;
+  async function remove(path) {
+    try { await unlink(path); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  }
+  async function showGuide(record) {
+    const claim = browserClaim(record.id);
+    try { await writeFile(claim, '', { flag: 'wx', mode: 0o600 }); }
+    catch (e) {
+      if (e.code === 'EEXIST') return { state: 'pending', url: record.url };
+      throw e;
+    }
+    let opened = false;
+    try {
+      if (await exists(marker)) return { state: 'seen' };
+      opened = await openBrowser(record.url);
+      return { state: opened ? 'opened' : 'link', url: record.url };
+    } finally {
+      if (!opened) await remove(claim);
+    }
+  }
   let owner = false;
   async function release() {
     if (!owner) return;
+    await remove(browserClaim(id));
     try {
       const current = JSON.parse(await readFile(pending, 'utf8'));
       if (current.id === id) await unlink(pending);
@@ -86,11 +108,16 @@ export async function startGuide({ host, locale, env = process.env, openBrowser 
       let previous;
       try { previous = JSON.parse(await readFile(pending, 'utf8')); }
       catch (e) { if (e.code === 'ENOENT') continue; throw e; }
-      if (active(previous, origin)) { bridge.close(); return { state: 'pending', url: previous.url }; }
-      try { await unlink(pending); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+      if (active(previous, origin)) {
+        bridge.close();
+        return reopenPending ? await showGuide(previous) : { state: 'pending', url: previous.url };
+      }
+      if (guideId.test(previous?.id)) await remove(browserClaim(previous.id));
+      await remove(pending);
     }
-    const opened = await openBrowser(bridge.url);
-    return { state: opened ? 'opened' : 'link', url: bridge.url, close: bridge.close };
+    const guide = await showGuide(record);
+    if (guide.state === 'seen') { bridge.close(); return guide; }
+    return { ...guide, close: bridge.close };
   } catch (e) { bridge.close(); throw e; }
   finally { await unlink(temp).catch(() => {}); }
 }

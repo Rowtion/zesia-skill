@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { installHost } from '../setup/install.mjs';
 import { hosts, paths, startGuide } from '../setup/guide.mjs';
+import { installClaudeStartup } from '../setup/claude-startup.mjs';
 
 async function fixture(t) {
   const dir = await mkdtemp(join(tmpdir(), 'zesia-setup-test-'));
@@ -54,11 +55,109 @@ test('missing credential permits sign-in and fallback link; skill hosts keep sep
   const second = await startGuide({ ...opts, host: 'opencode' }); t.after(second.close);
   assert.equal(second.state, 'link');
 });
+test('foreground startup reopens one pending guide after a failed browser launch', async t => {
+  const { env } = await fixture(t);
+  const host = 'claude-code';
+  const opts = { host, env, locale: 'en' };
+  const first = await startGuide({ ...opts, openBrowser: async () => false });
+  t.after(first.close);
+  assert.equal(first.state, 'link');
+  await assert.rejects(access(paths(host, env).marker), { code: 'ENOENT' });
+
+  let retries = 0;
+  const retry = () => startGuide({ ...opts, reopenPending: true, openBrowser: async url => {
+    assert.equal(url, first.url);
+    retries++;
+    return true;
+  } });
+  const restarted = await Promise.all([retry(), retry()]);
+  assert.deepEqual(restarted.map(guide => guide.state).sort(), ['opened', 'pending']);
+  assert.ok(restarted.every(guide => guide.url === first.url));
+  assert.equal(retries, 1);
+  await assert.rejects(access(paths(host, env).marker), { code: 'ENOENT' });
+
+  assert.equal((await request(first.url)).status, 200);
+  assert.equal((await retry()).state, 'seen');
+  assert.equal(retries, 1);
+});
+test('Claude Code setup preserves existing hooks and installs one reusable startup handler', async t => {
+  const { dir } = await fixture(t);
+  const directory = join(dir, "Plugin with spaces and '$");
+  const hooks = join(directory, 'hooks');
+  await mkdir(hooks, { recursive: true });
+  const path = join(hooks, 'hooks.json');
+  const existing = {
+    modules: ['./register.tsx'],
+    hooks: {
+      SessionStart: [{ matcher: 'startup', hooks: [{ type: 'command', command: 'own-startup', args: [] }] }],
+      SessionEnd: [{ hooks: [{ type: 'command', command: 'own-end', args: [] }] }],
+    },
+  };
+  await writeFile(path, JSON.stringify(existing));
+  const entry = join(dir, 'setup fixture.mjs');
+  await writeFile(entry, '// Verified Setup fixture');
+  const opts = { directory, entry, interpreter: process.execPath, locale: 'zh' };
+  await installClaudeStartup(opts);
+  await installClaudeStartup(opts);
+  const config = JSON.parse(await readFile(path, 'utf8'));
+  assert.deepEqual(config.modules, existing.modules);
+  assert.deepEqual(config.hooks.SessionEnd, existing.hooks.SessionEnd);
+  assert.deepEqual(config.hooks.SessionStart[0], existing.hooks.SessionStart[0]);
+  assert.equal(config.hooks.SessionStart.length, 2);
+  const [handler] = config.hooks.SessionStart[1].hooks;
+  assert.equal(handler.command, process.execPath);
+  assert.deepEqual(handler.args.slice(1), ['foreground-guide', 'claude-code', '--locale', 'zh']);
+  const installed = handler.args[0].replace('${CLAUDE_PLUGIN_ROOT}', directory);
+  assert.equal(await readFile(installed, 'utf8'), '// Verified Setup fixture');
+  await writeFile(installed, '// Changed script');
+  await assert.rejects(installClaudeStartup(opts), /guide file was changed/);
+  assert.equal(await readFile(installed, 'utf8'), '// Changed script');
+  assert.deepEqual(JSON.parse(await readFile(path, 'utf8')), config);
+});
+test('Claude Code setup leaves unrecognized hook settings intact', async t => {
+  const { dir } = await fixture(t);
+  const folder = join(dir, 'hooks');
+  await mkdir(folder);
+  const path = join(folder, 'hooks.json');
+  const raw = '{"hooks":{"SessionStart":"unrecognized"}}';
+  await writeFile(path, raw);
+  await assert.rejects(installClaudeStartup({ directory: dir, locale: 'en' }), /Review the existing Claude Code hook settings/);
+  assert.equal(await readFile(path, 'utf8'), raw);
+});
+test('packaged native Setup installs the Claude guide launcher with no system Node', { skip: !process.env.ZESIA_TEST_SETUP_NATIVE }, async t => {
+  const { dir, env } = await fixture(t);
+  const plugin = join(dir, 'Plugin with spaces');
+  await mkdir(join(plugin, '.claude-plugin'), { recursive: true });
+  await mkdir(join(plugin, 'scripts'));
+  await writeFile(join(plugin, '.claude-plugin/plugin.json'), '{"name":"zesia-consult"}');
+  await writeFile(join(plugin, 'scripts/install-a2a.mjs'), '// Synthetic preverified transport');
+  const packageDir = resolve('dist/setup/zesia-setup-1.0.2-' + process.platform + '-' + process.arch);
+  const node = join(packageDir, process.platform === 'win32' ? 'node.exe' : 'node');
+  const entry = join(packageDir, 'zesia-setup.mjs');
+  const options = { env: { ...process.env, ...env, PATH: '' }, encoding: 'utf8', timeout: 30000 };
+  const raw = execFileSync(node, [entry, 'claude-code', plugin, '--no-open'], options);
+  const setup = JSON.parse(raw);
+  assert.deepEqual(setup.foregroundGuide, { state: 'installed' });
+  assert.equal(setup.onboarding.state, 'link');
+  const state = JSON.parse(await readFile(paths('claude-code', env).pending));
+  t.after(() => { try { process.kill(state.pid); } catch {} });
+  const hooks = JSON.parse(await readFile(join(plugin, 'hooks/hooks.json')));
+  const handler = hooks.hooks.SessionStart[0].hooks[0];
+  const actual = name => name.replace('${CLAUDE_PLUGIN_ROOT}', setup.destination);
+  const installed = actual(handler.command);
+  assert.match(installed, /node\.exe$/u);
+  assert.equal(execFileSync(installed, handler.args.map(actual), {
+    ...options, env: { ...options.env, CLAUDE_CODE_ENTRYPOINT: 'sdk-cli' },
+  }), '');
+  await assert.rejects(access(paths('claude-code', env).marker), { code: 'ENOENT' });
+  const view = await (await request(setup.onboarding.url)).json();
+  assert.equal(view.packet.requester, 'Claude Code');
+});
 test('shipped CLI finishes provisioning before opening; bridge survives installer exit', async t => {
   const { dir, env } = await fixture(t);
   const node = process.execPath, native = process.env.ZESIA_TEST_SETUP_NATIVE;
   const platform = process.platform + '-' + process.arch;
-  const packageDir = resolve('dist/setup/zesia-setup-1.0.1-' + platform);
+  const packageDir = resolve('dist/setup/zesia-setup-1.0.2-' + platform);
   const executable = native ? join(packageDir, process.platform === 'win32' ? 'node.exe' : 'node') : node;
   const prefix = [native ? join(packageDir, 'zesia-setup.mjs') : fileURLToPath(new URL('../setup/cli.mjs', import.meta.url))];
   const run = (...args) => JSON.parse(execFileSync(executable, [...prefix, 'portable', dir, '--no-open', ...args],
