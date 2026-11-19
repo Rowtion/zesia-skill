@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { lstat, mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readdir, readFile, rename, rmdir, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { assertNoSecrets } from './evidence.mjs';
@@ -107,25 +107,76 @@ export async function readProfile(path = defaultProfilePath()) {
   return { version: PROFILE_VERSION, updatedAt: doc.updatedAt, items: doc.items };
 }
 
+const OWNER_MARKER = /^owner-([1-9]\d{0,9})-[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/u;
+
+async function removeEmptyLockDirectory(path) {
+  try {
+    await rmdir(path);
+  } catch (error) {
+    if (!['ENOENT', 'ENOTDIR', 'EEXIST', 'ENOTEMPTY'].includes(error.code)) throw error;
+  }
+}
+
+async function removeProfileLock(path, owner) {
+  await removeEmptyLockDirectory(join(path, owner));
+  // A replacement lock is published with a different owner already inside it.
+  // Removing only an empty directory cannot retire that replacement.
+  await removeEmptyLockDirectory(path);
+}
+
+async function recoverProfileLock(path) {
+  const owners = await readdir(path, { withFileTypes: true }).catch(error => {
+    if (['ENOENT', 'ENOTDIR'].includes(error.code)) return [];
+    throw error;
+  });
+  if (!owners.length) {
+    await removeEmptyLockDirectory(path);
+    return;
+  }
+  const [owner] = owners;
+  const pid = Number(OWNER_MARKER.exec(owner.name)?.[1]);
+  if (owners.length !== 1 || !owner.isDirectory() || !(pid > 0 && pid <= 0x7fffffff)) return;
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    if (error.code === 'ESRCH') await removeProfileLock(path, owner.name);
+  }
+}
+
 async function withProfileLock(path, update) {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const lockPath = `${path}.lock`;
   const deadline = Date.now() + 2500;
-  let lock;
-  while (!lock) {
-    try {
-      lock = await open(lockPath, 'wx', 0o600);
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error;
-      if (Date.now() >= deadline) throw new Error('The local Profile is busy. Wait for the other update and try again.');
-      await delay(20);
-    }
-  }
+  const owner = `owner-${process.pid}-${randomUUID()}`;
+  let claim = await mkdtemp(`${lockPath}-`);
   try {
+    await mkdir(join(claim, owner), { mode: 0o700 });
+    // Publish the populated directory in one step so an acquired lock always
+    // identifies its owner, even if the writer exits before the next operation.
+    while (claim !== lockPath) {
+      try {
+        await rename(claim, lockPath);
+        claim = lockPath;
+      } catch (error) {
+        const windowsContention = process.platform === 'win32' && ['EACCES', 'EPERM'].includes(error.code);
+        if (!windowsContention && !['EEXIST', 'ENOTEMPTY', 'ENOTDIR', 'EISDIR'].includes(error.code)) throw error;
+        const lock = await lstat(lockPath).catch(failure => {
+          if (failure.code === 'ENOENT') return null;
+          throw failure;
+        });
+        if (lock?.isDirectory()) await recoverProfileLock(lockPath);
+        else if (lock && !lock.isFile()) throw new Error('The local Profile lock must be a regular file or directory.');
+        if (Date.now() >= deadline) {
+          if (lock?.isFile()) throw new Error(`A legacy Profile lock has no owner record. After closing all Zesia processes using this Profile, move ${lockPath} aside and try again.`);
+          if (!lock && windowsContention) throw error;
+          throw new Error('The local Profile is busy. Wait for the other update and try again.');
+        }
+        await delay(20);
+      }
+    }
     return await update();
   } finally {
-    try { await lock.close(); }
-    finally { await unlink(lockPath); }
+    await removeProfileLock(claim, owner);
   }
 }
 
