@@ -36,8 +36,10 @@ export function createPortable({
   profilePath,
   configuration = () => readConfig(portableEnvironment(), { requireToken: false }),
   saveConfiguration = values => saveConfig(values, portableEnvironment()),
+  streaming = process.env.ZESIA_CONSULT_STREAMING === 'enabled',
   consult = consultOverA2A, recover = recoverConsult, ack = ackConsult, now = Date.now,
 } = {}) {
+  const previews = new Map();
   const resolvedProfilePath = profilePath || defaultProfilePath(process.env, stateDir !== DEFAULT_STATE_DIR() ? stateDir : null);
   const path = id => {
     if (!/^[0-9a-f-]{36}$/.test(id || '')) throw new Error('Invalid draft ID.');
@@ -157,7 +159,9 @@ export function createPortable({
         const response = await consult({ url: config.url, token: config.token, input: record.packet,
           contextId: record.continuation?.contextId, requestId: record.requestId,
           correlation: { requester: record.packet?.requester, hostVersion: record.packet?.hostVersion, runtimeVersion: runtimeVersion || undefined, parentRequestId: record.continuation?.previousRequestId || undefined },
-          signal: AbortSignal.timeout(60000) });
+          signal: AbortSignal.timeout(60000),
+          ...(streaming ? { onPreview: text => previews.set(id,text) } : {}),
+        });
         // Keep the full result locally. Return work-relevant fields once, without
         // echoing the submitted packet, routing probabilities or provider traces.
         return await acceptResponse(record,response);
@@ -176,7 +180,7 @@ export function createPortable({
           await unlink(path(id) + '.send').catch(err => { if (err.code !== 'ENOENT') throw err; });
         }
         return present(record);
-      }
+      } finally { previews.delete(id); }
     },
     async configure({ destination, token, draftId }) {
       if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{32,256}$/u.test(token)) throw new Error('Invalid activation token.');
@@ -212,11 +216,17 @@ export function createPortable({
       const config = await configuration().catch(() => null);
       const configured = Boolean(config?.token);
       const reauthRequired = Boolean(record.reauthRequired);
-      if(compact)return {status:record.status,configured,reauthRequired,agentReceivedAt:await receivedAt(id),
+      const preview = previews.get(id);
+      const progress = streaming ? {
+        streamPreviewVersion: 1,
+        ...(record.status==='unknown' && preview ? { streamPreview: preview } : {}),
+      } : {};
+      if(compact)return {status:record.status,...progress,configured,reauthRequired,agentReceivedAt:await receivedAt(id),
         ...(record.result?.ok===false?{result:{message:record.result.message}}:{})};
-      const profile=await readProfile(resolvedProfilePath).catch(()=>({version:1,updatedAt:null,items:[]}));
-      return {ok:true,draftId:record.id,requestId:record.requestId,status:record.status,configured,reauthRequired,approvedHash:record.hash,
+      const profile=await readProfile(resolvedProfilePath).catch(()=>null);
+      return {ok:true,draftId:record.id,requestId:record.requestId,status:record.status,...progress,configured,reauthRequired,approvedHash:record.hash,
         destination:record.destination,packet:structuredClone(record.packet),profile,
+        ...(profile ? {} : {profileError:'The local Profile could not be read. Inspect it with zesia profile.'}),
         expiresAt:new Date(record.expiresAt).toISOString(),result:record.result || null,rawResult:record.rawResult||null,agentReceivedAt:await receivedAt(id)};
     },
     async cancel(id, approvedHash) {

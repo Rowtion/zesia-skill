@@ -1,4 +1,6 @@
-import { chmod, lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
+import { lstat, mkdir, mkdtemp, readdir, readFile, rename, rmdir, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { assertNoSecrets } from './evidence.mjs';
@@ -105,16 +107,87 @@ export async function readProfile(path = defaultProfilePath()) {
   return { version: PROFILE_VERSION, updatedAt: doc.updatedAt, items: doc.items };
 }
 
-export async function writeProfile(doc, path = defaultProfilePath()) {
+const OWNER_MARKER = /^owner-([1-9]\d{0,9})-[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/u;
+
+async function removeEmptyLockDirectory(path) {
+  try {
+    await rmdir(path);
+  } catch (error) {
+    if (!['ENOENT', 'ENOTDIR', 'EEXIST', 'ENOTEMPTY'].includes(error.code)) throw error;
+  }
+}
+
+async function removeProfileLock(path, owner) {
+  await removeEmptyLockDirectory(join(path, owner));
+  // A replacement lock is published with a different owner already inside it.
+  // Removing only an empty directory cannot retire that replacement.
+  await removeEmptyLockDirectory(path);
+}
+
+async function recoverProfileLock(path) {
+  const owners = await readdir(path, { withFileTypes: true }).catch(error => {
+    if (['ENOENT', 'ENOTDIR'].includes(error.code)) return [];
+    throw error;
+  });
+  if (!owners.length) {
+    await removeEmptyLockDirectory(path);
+    return;
+  }
+  const [owner] = owners;
+  const pid = Number(OWNER_MARKER.exec(owner.name)?.[1]);
+  if (owners.length !== 1 || !owner.isDirectory() || !(pid > 0 && pid <= 0x7fffffff)) return;
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    if (error.code === 'ESRCH') await removeProfileLock(path, owner.name);
+  }
+}
+
+async function withProfileLock(path, update) {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const lockPath = `${path}.lock`;
+  const deadline = Date.now() + 2500;
+  const owner = `owner-${process.pid}-${randomUUID()}`;
+  let claim = await mkdtemp(`${lockPath}-`);
+  try {
+    await mkdir(join(claim, owner), { mode: 0o700 });
+    // Publish the populated directory in one step so an acquired lock always
+    // identifies its owner, even if the writer exits before the next operation.
+    while (claim !== lockPath) {
+      try {
+        await rename(claim, lockPath);
+        claim = lockPath;
+      } catch (error) {
+        const windowsContention = process.platform === 'win32' && ['EACCES', 'EPERM'].includes(error.code);
+        if (!windowsContention && !['EEXIST', 'ENOTEMPTY', 'ENOTDIR', 'EISDIR'].includes(error.code)) throw error;
+        const lock = await lstat(lockPath).catch(failure => {
+          if (failure.code === 'ENOENT') return null;
+          throw failure;
+        });
+        if (lock?.isDirectory()) await recoverProfileLock(lockPath);
+        else if (lock && !lock.isFile()) throw new Error('The local Profile lock must be a regular file or directory.');
+        if (Date.now() >= deadline) {
+          if (lock?.isFile()) throw new Error(`A legacy Profile lock has no owner record. After closing all Zesia processes using this Profile, move ${lockPath} aside and try again.`);
+          if (!lock && windowsContention) throw error;
+          throw new Error('The local Profile is busy. Wait for the other update and try again.');
+        }
+        await delay(20);
+      }
+    }
+    return await update();
+  } finally {
+    await removeProfileLock(claim, owner);
+  }
+}
+
+async function commitProfile(doc, path) {
   const serialized = `${JSON.stringify(doc, null, 2)}\n`;
   const bytes = Buffer.byteLength(serialized, 'utf8');
   validateProfile(doc, bytes);
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
+  const temporary = `${path}.${randomUUID()}.tmp`;
   try {
-    await writeFile(temporary, serialized, { mode: 0o600 });
+    await writeFile(temporary, serialized, { mode: 0o600, flag: 'wx' });
     await rename(temporary, path);
-    await chmod(path, 0o600);
   } catch (error) {
     await unlink(temporary).catch(() => {});
     throw error;
@@ -122,43 +195,59 @@ export async function writeProfile(doc, path = defaultProfilePath()) {
   return { bytes, path };
 }
 
-export async function setProfileItem({ id, text, sourceQuote, origin } = {}, { path = defaultProfilePath(), now = Date.now } = {}) {
+export function writeProfile(doc, path = defaultProfilePath()) {
+  return withProfileLock(path, () => commitProfile(doc, path));
+}
+
+function profileTimestamp(profile, now) {
+  const previous = Date.parse(profile.updatedAt ?? '');
+  return new Date(Number.isFinite(previous) ? Math.max(now(), previous + 1) : now()).toISOString();
+}
+
+export async function setProfileItem({ id, text, sourceQuote, origin, expectedUpdatedAt } = {}, { path = defaultProfilePath(), now = Date.now } = {}) {
   if (origin !== undefined && origin !== 'user_statement') {
     throw new Error('Only user_statement principles with a verbatim sourceQuote can be saved to Profile.');
   }
-  const current = await readProfile(path);
-  const timestamp = new Date(now()).toISOString();
-  const nextItem = { id, text, sourceQuote, updatedAt: timestamp };
-  validateItemShape(nextItem);
-  const items = current.items.map(item => ({ ...item }));
-  const index = items.findIndex(item => item.id === id);
-  let action;
-  if (index !== -1) {
-    items[index] = nextItem;
-    action = 'updated';
-  } else if (items.length >= MAX_PROFILE_ITEMS) {
-    throw new Error(`Profile already has ${MAX_PROFILE_ITEMS} items (max ${MAX_PROFILE_ITEMS}). Overwrite an existing id in-place or remove one with "zesia profile rm <id>".`);
-  } else {
-    items.push(nextItem);
-    action = 'created';
-  }
-  const { bytes } = await writeProfile({ version: PROFILE_VERSION, updatedAt: timestamp, items }, path);
-  return { ok: true, action, item: nextItem, count: items.length, maxItems: MAX_PROFILE_ITEMS, bytes, maxBytes: MAX_PROFILE_BYTES, path };
+  return withProfileLock(path, async () => {
+    const current = await readProfile(path);
+    const timestamp = profileTimestamp(current, now);
+    const nextItem = { id, text, sourceQuote, updatedAt: timestamp };
+    validateItemShape(nextItem);
+    const items = current.items.map(item => ({ ...item }));
+    const index = items.findIndex(item => item.id === id);
+    if (expectedUpdatedAt !== undefined && (items[index]?.updatedAt ?? null) !== expectedUpdatedAt) {
+      throw new Error('The selected Profile slot changed. Refresh the review before saving again.');
+    }
+    let action;
+    if (index !== -1) {
+      items[index] = nextItem;
+      action = 'updated';
+    } else if (items.length >= MAX_PROFILE_ITEMS) {
+      throw new Error(`Profile already has ${MAX_PROFILE_ITEMS} items (max ${MAX_PROFILE_ITEMS}). Overwrite an existing id in-place or remove one with "zesia profile rm <id>".`);
+    } else {
+      items.push(nextItem);
+      action = 'created';
+    }
+    const { bytes } = await commitProfile({ version: PROFILE_VERSION, updatedAt: timestamp, items }, path);
+    return { ok: true, action, item: nextItem, count: items.length, maxItems: MAX_PROFILE_ITEMS, bytes, maxBytes: MAX_PROFILE_BYTES, path };
+  });
 }
 
 export async function removeProfileItem(id, { path = defaultProfilePath(), now = Date.now } = {}) {
   if (typeof id !== 'string' || !ID_PATTERN.test(id)) {
     throw new Error('Profile item id must be 1-32 alphanumeric, dot, underscore, or hyphen characters.');
   }
-  const current = await readProfile(path);
-  const index = current.items.findIndex(item => item.id === id);
-  if (index === -1) {
-    throw new Error(`Profile item "${id}" does not exist.`);
-  }
-  const items = current.items.filter((_, idx) => idx !== index);
-  const timestamp = new Date(now()).toISOString();
-  const { bytes } = await writeProfile({ version: PROFILE_VERSION, updatedAt: timestamp, items }, path);
-  return { ok: true, action: 'removed', id, count: items.length, maxItems: MAX_PROFILE_ITEMS, bytes, maxBytes: MAX_PROFILE_BYTES, path };
+  return withProfileLock(path, async () => {
+    const current = await readProfile(path);
+    const index = current.items.findIndex(item => item.id === id);
+    if (index === -1) {
+      throw new Error(`Profile item "${id}" does not exist.`);
+    }
+    const items = current.items.filter((_, idx) => idx !== index);
+    const timestamp = profileTimestamp(current, now);
+    const { bytes } = await commitProfile({ version: PROFILE_VERSION, updatedAt: timestamp, items }, path);
+    return { ok: true, action: 'removed', id, count: items.length, maxItems: MAX_PROFILE_ITEMS, bytes, maxBytes: MAX_PROFILE_BYTES, path };
+  });
 }
 
 /** Format the bounded local Profile as deterministic Markdown for human review or cross-agent export. */

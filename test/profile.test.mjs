@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { createPortable } from '../runtime.mjs';
 import {
@@ -17,7 +19,7 @@ import {
 import { startOnlineReview } from '../review/online.mjs';
 
 const execute = promisify(execFile);
-const CLI_PATH = new URL('../cli.mjs', import.meta.url).pathname;
+const CLI_PATH = fileURLToPath(new URL('../cli.mjs', import.meta.url));
 
 test('profile enforces <= 10 items, text <= 200 chars, <= 4 KB, required non-empty sourceQuote, and in-place overwrite', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'zesia-profile-bounds-'));
@@ -248,6 +250,78 @@ test('prepare injects profile into context.statements covered by approvedHash wi
   }
 });
 
+test('independent CLI workers preserve different Profile slots', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'zesia-profile-concurrent-'));
+  const path = join(dir, 'profile.json');
+  const env = { ...process.env, ZESIA_PROFILE: path, ZESIA_STATE_DIR: join(dir, 'state') };
+  try {
+    const ids = ['p1', 'p2', 'p3', 'p4', 'p5'];
+    await Promise.all(ids.map(id => execute(process.execPath, [
+      CLI_PATH, 'profile', 'set', id, 'Preserve ' + id, '--quote', 'Keep rule ' + id,
+    ], { env })));
+    assert.deepEqual((await readProfile(path)).items.map(item => item.id).sort(), ids);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('Profile keeps a live writer’s lock and recovers it after the writer is killed', { timeout: 20_000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'zesia-profile-abandoned-'));
+  const path = join(dir, 'profile.json');
+  const fixture = id => ({ id, text: 'Preserve ' + id, sourceQuote: 'Keep rule ' + id });
+  await setProfileItem(fixture('original'), { path });
+
+  const runtime = new URL('../runtime/profile.mjs', import.meta.url).href;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `
+    import { writeSync } from 'node:fs';
+    import { setProfileItem } from ${JSON.stringify(runtime)};
+    await setProfileItem(${JSON.stringify(fixture('interrupted'))}, {
+      path: process.argv[1],
+      now() {
+        writeSync(1, 'locked');
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+      },
+    });
+  `, path], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const closed = once(child, 'close');
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    await closed;
+    await rm(dir, { recursive: true, force: true });
+  });
+  const [marker] = await Promise.race([
+    once(child.stdout, 'data'),
+    closed.then(() => { throw new Error('The test writer exited before taking the lock.'); }),
+  ]);
+  assert.equal(marker.toString(), 'locked');
+  await assert.rejects(setProfileItem(fixture('contender'), { path }), /Profile is busy/u);
+  assert.deepEqual((await readProfile(path)).items.map(item => item.id), ['original']);
+
+  child.kill('SIGKILL');
+  await closed;
+  const env = { ...process.env, ZESIA_PROFILE: path, ZESIA_CONFIG: join(dir, 'config.json'), ZESIA_STATE_DIR: join(dir, 'state') };
+  const ids = ['p1', 'p2', 'p3', 'p4'];
+  await Promise.all(ids.map(id => execute(process.execPath, [
+    CLI_PATH, 'profile', 'set', id, fixture(id).text, '--quote', fixture(id).sourceQuote,
+  ], { env })));
+  assert.deepEqual((await readProfile(path)).items.map(item => item.id).sort(), ['original', ...ids]);
+  await assert.rejects(stat(path + '.lock'), { code: 'ENOENT' });
+});
+
+test('Profile preserves a legacy lock file that has no provable owner', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'zesia-profile-legacy-lock-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, 'profile.json');
+  const lockPath = path + '.lock';
+  await writeFile(lockPath, '', { flag: 'wx', mode: 0o600 });
+  await assert.rejects(
+    setProfileItem({ id: 'p1', text: 'Keep this rule', sourceQuote: 'Keep this rule' }, { path }),
+    /legacy Profile lock.*owner/u
+  );
+  assert.equal(await readFile(lockPath, 'utf8'), '');
+  assert.deepEqual((await readProfile(path)).items, []);
+});
+
 test('bridge /bridge/v1/view exposes injected statements & profile and POST /bridge/v1/profile distills user statements safely', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'zesia-profile-bridge-'));
   const profilePath = join(dir, 'profile.json');
@@ -256,9 +330,11 @@ test('bridge /bridge/v1/view exposes injected statements & profile and POST /bri
     { path: profilePath }
   );
 
+  let inferenceCalls = 0;
   const runtime = createPortable({
     stateDir: dir,
     profilePath,
+    consult: async () => { inferenceCalls++; throw new Error('Unexpected consultation'); },
     configuration: async () => ({ url: 'https://api.zesia.dev', token: 'synthetic-bridge-token-123456789012345' }),
   });
 
@@ -306,44 +382,22 @@ test('bridge /bridge/v1/view exposes injected statements & profile and POST /bri
     assert.equal(viewData.packet.context.statements.length, 3);
     assert.equal(viewData.packet.context.statements[2].sourceRef, 'zesia:profile:p1');
 
-    // Reject agent_inference or missing sourceQuote over bridge.
-    const inferRes = await fetch(`${origin}/bridge/v1/profile`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        protocolVersion: 1,
-        id: 'p2',
-        text: 'Agent inferred rule',
-        sourceQuote: 'Even with text',
-        origin: 'agent_inference',
-      }),
+    assert.equal(viewData.profileWriteVersion, 1);
+    const save = (payload) => fetch(`${origin}/bridge/v1/profile`, {
+      method: 'POST', headers, body: JSON.stringify(payload),
     });
-    assert.equal(inferRes.status, 400);
+    const request = { protocolVersion: 1, id: 'p2', expectedUpdatedAt: null, statementId: 'u2' };
+    for (const payload of [
+      { ...request, statementId: 'different-draft-statement' },
+      { ...request, statementId: 'a1' },
+      { ...request, statementId: 'profile:p1' },
+      { ...request, text: 'A caller-supplied substitute' },
+      { ...request, sourceQuote: 'A caller-supplied substitute' },
+      { protocolVersion: 1, id: 'p2' },
+    ]) assert.equal((await save(payload)).status, 400);
+    assert.equal((await readProfile(profilePath)).items.length, 1);
 
-    const noQuoteRes = await fetch(`${origin}/bridge/v1/profile`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        protocolVersion: 1,
-        id: 'p2',
-        text: 'Missing quote rule',
-        sourceQuote: '',
-      }),
-    });
-    assert.equal(noQuoteRes.status, 400);
-
-    // Save verified user_statement constraint into local profile.json without changing draft approvedHash.
-    const saveRes = await fetch(`${origin}/bridge/v1/profile`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        protocolVersion: 1,
-        id: 'p2',
-        text: 'Never mutate approvedHash on profile save',
-        sourceQuote: '不绕过审阅窗的显式批准边界',
-        origin: 'user_statement',
-      }),
-    });
+    const saveRes = await save(request);
     assert.equal(saveRes.status, 200);
     const afterSave = await saveRes.json();
     assert.equal(afterSave.approvedHash, prepared.approvedHash);
@@ -353,6 +407,11 @@ test('bridge /bridge/v1/view exposes injected statements & profile and POST /bri
     const storedProfile = await readProfile(profilePath);
     assert.equal(storedProfile.items.length, 2);
     assert.equal(storedProfile.items[1].sourceQuote, '不绕过审阅窗的显式批准边界');
+    assert.equal((await save(request)).status, 400, 'a previously empty slot cannot be overwritten silently');
+    const replaced = await save({ ...request, expectedUpdatedAt: storedProfile.items[1].updatedAt });
+    assert.equal(replaced.status, 200);
+    assert.equal((await save({ ...request, expectedUpdatedAt: storedProfile.items[1].updatedAt })).status, 400);
+    assert.equal(inferenceCalls, 0);
   } finally {
     session.close();
     await rm(dir, { recursive: true, force: true });
