@@ -77,33 +77,37 @@ test('shipped CLI finishes provisioning before opening; bridge survives installe
 });
 
 
-test('OpenCode setup installs its verified command and preserves existing commands', { skip: process.platform === 'win32' }, async t => {
-  const { dir } = await fixture(t);
-  const root = await realpath(dir);
-  const bundle = join(root, 'bundle');
-  const project = join(root, 'project');
-  const scope = join(project, '.opencode');
-  const destination = join(scope, 'skills', 'zesia-consult');
-  await mkdir(join(bundle, 'scripts'), { recursive: true });
-  await mkdir(join(destination, 'commands'), { recursive: true });
-  await writeFile(join(bundle, 'host.json'), JSON.stringify({ id: 'opencode', format: 'zesia.host-adapter.v1' }));
-  const installed = JSON.stringify({ ok: true, destination });
-  await writeFile(join(bundle, 'scripts', 'zesia'), "#!/bin/sh\nprintf '%s\\n' '" + installed + "'\n", { mode: 0o700 });
-  const install = () => installHost({ host: 'opencode', directory: bundle, project });
-  assert.equal((await install()).directCommand, 'unavailable');
-  const name = 'zesia-consult.md';
-  await writeFile(join(destination, 'commands', name), 'verified command');
-  assert.equal((await install()).directCommand, 'installed');
-  const commands = join(scope, 'commands');
-  const target = join(commands, name);
-  assert.equal(await readFile(target, 'utf8'), 'verified command');
-  await writeFile(target, 'user command');
-  assert.equal((await install()).directCommand, 'preserved');
-  assert.equal(await readFile(target, 'utf8'), 'user command');
-  await rm(commands, { recursive: true });
-  const unrelated = join(root, 'unrelated');
-  await mkdir(unrelated);
-  await symlink(unrelated, commands, 'dir');
-  assert.equal((await install()).directCommand, 'preserved');
-  await assert.rejects(access(join(unrelated, name)), { code: 'ENOENT' });
-});
+for (const [host, folder, name] of [
+  ['opencode', '.opencode', 'zesia-consult.md'],
+  ['gemini-cli', '.gemini', 'zesia-consult.toml'],
+]) {
+  test(host + ' setup installs its verified command and preserves existing commands', { skip: process.platform === 'win32' }, async t => {
+    const { dir } = await fixture(t);
+    const root = await realpath(dir);
+    const bundle = join(root, 'bundle');
+    const project = join(root, 'project');
+    const scope = join(project, folder);
+    const destination = join(scope, 'skills', 'zesia-consult');
+    await mkdir(join(bundle, 'scripts'), { recursive: true });
+    await mkdir(join(destination, 'commands'), { recursive: true });
+    await writeFile(join(bundle, 'host.json'), JSON.stringify({ id: host, format: 'zesia.host-adapter.v1' }));
+    const installed = JSON.stringify({ ok: true, destination });
+    await writeFile(join(bundle, 'scripts', 'zesia'), "#!/bin/sh\nprintf '%s\\n' '" + installed + "'\n", { mode: 0o700 });
+    const install = () => installHost({ host, directory: bundle, project });
+    assert.equal((await install()).directCommand, 'unavailable');
+    await writeFile(join(destination, 'commands', name), 'verified command');
+    assert.equal((await install()).directCommand, 'installed');
+    const commands = join(scope, 'commands');
+    const target = join(commands, name);
+    assert.equal(await readFile(target, 'utf8'), 'verified command');
+    await writeFile(target, 'user command');
+    assert.equal((await install()).directCommand, 'preserved');
+    assert.equal(await readFile(target, 'utf8'), 'user command');
+    await rm(commands, { recursive: true });
+    const unrelated = join(root, 'unrelated');
+    await mkdir(unrelated);
+    await symlink(unrelated, commands, 'dir');
+    assert.equal((await install()).directCommand, 'preserved');
+    await assert.rejects(access(join(unrelated, name)), { code: 'ENOENT' });
+  });
+}

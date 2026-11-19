@@ -20,8 +20,12 @@ async function registeredDsh(dsh, profile) {
   if (!target || !directory) throw Error('Review the existing DSH registration before changing it.');
   return realpath(resolve(directory, target));
 }
-async function installOpenCodeCommand(destination) {
-  const name = 'zesia-consult.md';
+const consultCommands = new Map([
+  ['opencode', 'zesia-consult.md'],
+  ['gemini-cli', 'zesia-consult.toml'],
+]);
+
+async function installConsultCommand(destination, name) {
   const source = join(destination, 'commands', name);
   const asset = await lstat(source).catch(error => {
     if (error.code === 'ENOENT') return null;
@@ -29,7 +33,7 @@ async function installOpenCodeCommand(destination) {
   });
   if (!asset) return 'unavailable';
   if (!asset.isFile() || asset.nlink !== 1 || asset.size === 0 || asset.size > 16_384)
-    throw Error('The OpenCode command in this package is invalid.');
+    throw Error('The Consult command in this package is invalid.');
 
   const scope = dirname(dirname(destination));
   const directory = join(scope, 'commands');
@@ -66,7 +70,8 @@ export async function installHost({ host, directory, profile, dsh = 'dsh', proje
     const installed = JSON.parse(invoke(binary, ['install', ...(project ? ['--project', resolve(project)] : []),
       ...(upgrade ? ['--upgrade'] : [])], true));
     if (!installed.ok || !installed.destination) throw Error('Installation did not return a destination.');
-    if (host === 'opencode') installed.directCommand = await installOpenCodeCommand(installed.destination);
+    const command = consultCommands.get(host);
+    if (command) installed.directCommand = await installConsultCommand(installed.destination, command);
     return installed;
   }
   if (host === 'dsh') {
