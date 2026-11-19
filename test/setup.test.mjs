@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile, readFile, access, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, access, rm, symlink, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { installHost } from '../setup/install.mjs';
 import { hosts, paths, startGuide } from '../setup/guide.mjs';
 
 async function fixture(t) {
@@ -57,7 +58,7 @@ test('shipped CLI finishes provisioning before opening; bridge survives installe
   const { dir, env } = await fixture(t);
   const node = process.execPath, native = process.env.ZESIA_TEST_SETUP_NATIVE;
   const platform = process.platform + '-' + process.arch;
-  const packageDir = resolve('dist/setup/zesia-setup-1.0.0-' + platform);
+  const packageDir = resolve('dist/setup/zesia-setup-1.0.1-' + platform);
   const executable = native ? join(packageDir, process.platform === 'win32' ? 'node.exe' : 'node') : node;
   const prefix = [native ? join(packageDir, 'zesia-setup.mjs') : fileURLToPath(new URL('../setup/cli.mjs', import.meta.url))];
   const run = (...args) => JSON.parse(execFileSync(executable, [...prefix, 'portable', dir, '--no-open', ...args],
@@ -73,4 +74,36 @@ test('shipped CLI finishes provisioning before opening; bridge survives installe
   const view = await (await request(result.onboarding.url)).json();
   assert.equal(view.guideLocale, 'zh'); assert.equal(view.configured, false);
   assert.equal(run().onboarding.state, 'seen');
+});
+
+
+test('OpenCode setup installs its verified command and preserves existing commands', { skip: process.platform === 'win32' }, async t => {
+  const { dir } = await fixture(t);
+  const root = await realpath(dir);
+  const bundle = join(root, 'bundle');
+  const project = join(root, 'project');
+  const scope = join(project, '.opencode');
+  const destination = join(scope, 'skills', 'zesia-consult');
+  await mkdir(join(bundle, 'scripts'), { recursive: true });
+  await mkdir(join(destination, 'commands'), { recursive: true });
+  await writeFile(join(bundle, 'host.json'), JSON.stringify({ id: 'opencode', format: 'zesia.host-adapter.v1' }));
+  const installed = JSON.stringify({ ok: true, destination });
+  await writeFile(join(bundle, 'scripts', 'zesia'), "#!/bin/sh\nprintf '%s\\n' '" + installed + "'\n", { mode: 0o700 });
+  const install = () => installHost({ host: 'opencode', directory: bundle, project });
+  assert.equal((await install()).directCommand, 'unavailable');
+  const name = 'zesia-consult.md';
+  await writeFile(join(destination, 'commands', name), 'verified command');
+  assert.equal((await install()).directCommand, 'installed');
+  const commands = join(scope, 'commands');
+  const target = join(commands, name);
+  assert.equal(await readFile(target, 'utf8'), 'verified command');
+  await writeFile(target, 'user command');
+  assert.equal((await install()).directCommand, 'preserved');
+  assert.equal(await readFile(target, 'utf8'), 'user command');
+  await rm(commands, { recursive: true });
+  const unrelated = join(root, 'unrelated');
+  await mkdir(unrelated);
+  await symlink(unrelated, commands, 'dir');
+  assert.equal((await install()).directCommand, 'preserved');
+  await assert.rejects(access(join(unrelated, name)), { code: 'ENOENT' });
 });

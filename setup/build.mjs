@@ -4,7 +4,7 @@ import { resolve, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { build } from 'esbuild';
 
-const version = '1.0.0';
+const version = '1.0.1';
 const native = process.argv.includes('--native');
 const platform = process.platform + '-' + process.arch;
 const name = 'zesia-setup-' + version + '-' + (native ? platform : 'node');
