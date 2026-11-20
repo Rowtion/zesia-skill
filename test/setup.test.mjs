@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { installHost } from '../setup/install.mjs';
 import { hosts, paths, startGuide } from '../setup/guide.mjs';
 import { installClaudeStartup } from '../setup/claude-startup.mjs';
+import { installOpenCodeStartup } from '../setup/opencode-startup.mjs';
+import jsonc from 'jsonc-parser';
 
 async function fixture(t) {
   const dir = await mkdtemp(join(tmpdir(), 'zesia-setup-test-'));
@@ -124,6 +126,47 @@ test('Claude Code setup leaves unrecognized hook settings intact', async t => {
   await assert.rejects(installClaudeStartup({ directory: dir, locale: 'en' }), /Review the existing Claude Code hook settings/);
   assert.equal(await readFile(path, 'utf8'), raw);
 });
+test('OpenCode setup preserves commented settings and refreshes only its managed TUI entry', async t => {
+  const { dir } = await fixture(t);
+  const scope = join(dir, 'Configuration with spaces', '.opencode');
+  const directory = join(scope, 'skills', 'zesia-consult');
+  await mkdir(directory, { recursive: true });
+  const json = join(scope, 'tui.json');
+  const jsoncPath = join(scope, 'tui.jsonc');
+  await writeFile(json, '{"theme":"custom"}\n');
+  await writeFile(jsoncPath, '{\n  // Retain this comment.\n  "tui": {"plugin": ["./own.js"],},\n}\n');
+  const entry = join(dir, 'fixture-setup.mjs');
+  await writeFile(entry, '// bundled setup fixture');
+  const opts = { directory, entry, interpreter: process.execPath, locale: 'zh' };
+  await installOpenCodeStartup(opts);
+  const installed = await readFile(jsoncPath, 'utf8');
+  assert.match(installed, /Retain this comment/u);
+  const parse = source => jsonc.parse(source, [], { allowTrailingComma: true });
+  const plugins = parse(installed).tui.plugin;
+  assert.equal(plugins.length, 2);
+  assert.equal(plugins[0], './own.js');
+  assert.match(plugins[1], /^\.\/\.zesia-first-use-[a-f0-9]{64}\/tui\.mjs$/u);
+  assert.match(await readFile(join(scope, plugins[1]), 'utf8'), /'serve-guide', 'opencode', '--locale', "zh", '--reopen-pending'/u);
+  await installOpenCodeStartup(opts);
+  assert.equal(await readFile(jsoncPath, 'utf8'), installed);
+  assert.equal(await readFile(json, 'utf8'), '{"theme":"custom"}\n');
+  await writeFile(entry, '// new bundled setup fixture');
+  await installOpenCodeStartup(opts);
+  const upgraded = parse(await readFile(jsoncPath, 'utf8')).tui.plugin;
+  assert.equal(upgraded.length, 2);
+  assert.equal(upgraded[0], plugins[0]);
+  assert.notEqual(upgraded[1], plugins[1]);
+});
+test('OpenCode setup preserves unreadable TUI configuration', async t => {
+  const { dir } = await fixture(t);
+  const directory = join(dir, 'skills', 'zesia-consult');
+  await mkdir(directory, { recursive: true });
+  const settings = join(dir, 'tui.json');
+  const original = '{"plugin":"invalid"}';
+  await writeFile(settings, original);
+  await assert.rejects(installOpenCodeStartup({ directory, locale: 'en' }), /Review the existing OpenCode TUI plugin list/u);
+  assert.equal(await readFile(settings, 'utf8'), original);
+});
 test('packaged native Setup installs the Claude guide launcher with no system Node', { skip: !process.env.ZESIA_TEST_SETUP_NATIVE }, async t => {
   const { dir, env } = await fixture(t);
   const plugin = join(dir, 'Plugin with spaces');
@@ -131,7 +174,7 @@ test('packaged native Setup installs the Claude guide launcher with no system No
   await mkdir(join(plugin, 'scripts'));
   await writeFile(join(plugin, '.claude-plugin/plugin.json'), '{"name":"zesia-consult"}');
   await writeFile(join(plugin, 'scripts/install-a2a.mjs'), '// Synthetic preverified transport');
-  const packageDir = resolve('dist/setup/zesia-setup-1.0.2-' + process.platform + '-' + process.arch);
+  const packageDir = resolve('dist/setup/zesia-setup-1.0.3-' + process.platform + '-' + process.arch);
   const node = join(packageDir, process.platform === 'win32' ? 'node.exe' : 'node');
   const entry = join(packageDir, 'zesia-setup.mjs');
   const options = { env: { ...process.env, ...env, PATH: '' }, encoding: 'utf8', timeout: 30000 };
@@ -157,7 +200,7 @@ test('shipped CLI finishes provisioning before opening; bridge survives installe
   const { dir, env } = await fixture(t);
   const node = process.execPath, native = process.env.ZESIA_TEST_SETUP_NATIVE;
   const platform = process.platform + '-' + process.arch;
-  const packageDir = resolve('dist/setup/zesia-setup-1.0.2-' + platform);
+  const packageDir = resolve('dist/setup/zesia-setup-1.0.3-' + platform);
   const executable = native ? join(packageDir, process.platform === 'win32' ? 'node.exe' : 'node') : node;
   const prefix = [native ? join(packageDir, 'zesia-setup.mjs') : fileURLToPath(new URL('../setup/cli.mjs', import.meta.url))];
   const run = (...args) => JSON.parse(execFileSync(executable, [...prefix, 'portable', dir, '--no-open', ...args],

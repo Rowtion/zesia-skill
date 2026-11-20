@@ -8,7 +8,8 @@
     "url": "https://github.com/Rowtion/zesia-skill.git"
   },
   "devDependencies": {
-    "esbuild": "0.25.12"
+    "esbuild": "0.25.12",
+    "jsonc-parser": "3.3.1"
   },
   "scripts": {
     "test": "node --test runtime.test.mjs test/*.test.mjs",
