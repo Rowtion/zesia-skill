@@ -6,6 +6,7 @@ export const ONLINE_PROTOCOL=1;
 export const ONLINE_ORIGINS=Object.freeze(['https://zesia.dev','https://zesia-public-staging.cprindex.workers.dev']);
 const equal=(a,b)=>typeof a==='string'&&Buffer.byteLength(a)===Buffer.byteLength(b)&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
 const approvalKeys=['approvedHash','destination','draftId','protocolVersion','requestId'];
+const discussionApprovalKeys=[...approvalKeys,'maxRounds'].sort();
 const configureKeys=['destination','protocolVersion','token'];
 const profileKeys=['expectedUpdatedAt','id','protocolVersion','statementId'];
 export async function startOnlineReview({runtime,draftId,onlineOrigin='https://zesia.dev',idleMs=24*60*60_000,lifetimeMs=24*60*60_000,onClose=()=>{},onGuideView}){
@@ -54,7 +55,7 @@ export async function startOnlineReview({runtime,draftId,onlineOrigin='https://z
    }
    if(initial.status==='onboarding'&&req.method==='POST'&&req.url!=='/bridge/v1/configure')
     return reply(res,404,{ok:false,message:'Only sign-in is available in the installation guide.'});
-   if(req.method!=='POST'||!['/bridge/v1/approve','/bridge/v1/cancel','/bridge/v1/configure','/bridge/v1/profile'].includes(req.url))return reply(res,404,{ok:false,message:'Unknown bridge operation.'});
+   if(req.method!=='POST'||!['/bridge/v1/approve','/bridge/v1/cancel','/bridge/v1/configure','/bridge/v1/profile','/bridge/v1/stop-discussion'].includes(req.url))return reply(res,404,{ok:false,message:'Unknown bridge operation.'});
    const input=await body(req);
    if(req.url==='/bridge/v1/profile'){
     if(!input||Array.isArray(input)||Object.keys(input).sort().join(',')!==profileKeys.join(',')
@@ -89,9 +90,18 @@ export async function startOnlineReview({runtime,draftId,onlineOrigin='https://z
     lastError=null;
     return reply(res,200,await view());
    }
-   if(!input||Array.isArray(input)||Object.keys(input).sort().join(',')!==approvalKeys.join(','))return reply(res,400,{ok:false,message:'Only the exact reviewed approval is accepted.'});
+   const approving=req.url==='/bridge/v1/approve';
+   const discussionApproval=approving&&Object.hasOwn(input??{},'maxRounds');
+   const expectedKeys=discussionApproval?discussionApprovalKeys:approvalKeys;
+   if(!input||Array.isArray(input)||Object.keys(input).sort().join(',')!==expectedKeys.join(','))return reply(res,400,{ok:false,message:'Only the exact reviewed approval is accepted.'});
    const current=await runtime.inspect(draftId);
+   if(discussionApproval&&(input.maxRounds!==3||current.discussionMaxRounds!==3))return reply(res,400,{ok:false,message:'This review does not support the selected discussion scope.'});
    if(input.protocolVersion!==ONLINE_PROTOCOL||input.draftId!==draftId||input.requestId!==current.requestId||input.approvedHash!==current.approvedHash||input.destination!==current.destination)return reply(res,409,{ok:false,message:'The reviewed request changed. Nothing new was sent.'});
+   if(req.url==='/bridge/v1/stop-discussion'){
+    if(typeof runtime.stopDiscussion!=='function'||current.discussion?.canStop!==true)return reply(res,409,{ok:false,message:'The discussion has no future round to stop.'});
+    await runtime.stopDiscussion(draftId,input.approvedHash);
+    return reply(res,200,await view());
+   }
    if(busy)return reply(res,202,{ok:true,status:'sending',requestId:current.requestId,requestInProgress:true});
    if(current.status!=='prepared')return reply(res,200,await view());
    if(Date.now()>Date.parse(current.expiresAt))return reply(res,410,{ok:false,message:'These materials expired. Ask your agent to prepare a new review.'});
@@ -99,7 +109,8 @@ export async function startOnlineReview({runtime,draftId,onlineOrigin='https://z
    busy=true;lastError=null;
    // A short acknowledgement separates accepting the click from completing cloud
    // inference. Closing the page never cancels or repeats this execution.
-   Promise.resolve().then(()=>runtime.send(draftId,input.approvedHash,'Approved in the ZESIA online review window.')).catch(error=>{lastError=error.message;}).finally(()=>{busy=false;lastActivity=Date.now();});
+   Promise.resolve().then(()=>runtime.send(draftId,input.approvedHash,'Approved in the ZESIA online review window.',
+    discussionApproval?{maxRounds:input.maxRounds}:undefined)).catch(error=>{lastError=error.message;}).finally(()=>{busy=false;lastActivity=Date.now();});
    return reply(res,202,{ok:true,status:'sending',requestId:current.requestId,requestInProgress:true});
   }catch(error){if(!res.headersSent)reply(res,400,{ok:false,message:error.message,retryAllowed:false});else res.end();}
  });
