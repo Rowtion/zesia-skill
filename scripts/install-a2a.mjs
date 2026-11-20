@@ -25,7 +25,11 @@ export async function installA2A({root=fileURLToPath(new URL('../',import.meta.u
  const temporary=await mkdtemp(join(tmpdir(),'zesia-a2a-install-'));
  try{let bytes;if(archivePath)bytes=await readFile(archivePath);else{const response=await fetch('https://github.com/a2aproject/a2a-cli/releases/download/v'+A2A_VERSION+'/'+file,{signal:AbortSignal.timeout(60000)});if(!response.ok)throw Error('Could not download the pinned A2A CLI.');bytes=Buffer.from(await response.arrayBuffer());}
   if(createHash('sha256').update(bytes).digest('hex')!==sha256)throw Error('A2A CLI archive checksum mismatch.');const archive=join(temporary,file);await writeFile(archive,bytes);const extracted=join(temporary,'extracted');await mkdir(extracted);
-  if(platform==='win32'){const quote=s=>"'"+s.replaceAll("'","''")+"'";execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command','Expand-Archive -LiteralPath '+quote(archive)+' -DestinationPath '+quote(extracted)],{windowsHide:true});}else execFileSync('tar',['-xzf',archive,'-C',extracted]);
+  if(platform==='win32'){
+   execFileSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',
+    "$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory($env:ZESIA_A2A_ZIP, $env:ZESIA_A2A_EXTRACT)"],
+    {windowsHide:true,env:{...process.env,ZESIA_A2A_ZIP:archive,ZESIA_A2A_EXTRACT:extracted}});
+  }else execFileSync('tar',['-xzf',archive,'-C',extracted]);
   const data=await readFile(join(extracted,binary));await safeOutput(output,true);await atomicCacheFile(output,binary,data,0o755);await atomicCacheFile(output,'A2A-CLI-LICENSE',await readFile(join(extracted,'LICENSE')));const installed={version:A2A_VERSION,platform:platform+'-'+arch,archiveSha256:sha256,binarySha256:createHash('sha256').update(data).digest('hex')};await atomicCacheFile(output,'installed.json',JSON.stringify(installed,null,2)+'\n');return installed;
  }finally{await rm(temporary,{recursive:true,force:true});}
 }
