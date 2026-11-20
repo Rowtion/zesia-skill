@@ -7,6 +7,7 @@ import { setTimeout as pause } from 'node:timers/promises';
 import { startGuide, hosts, paths } from './guide.mjs';
 import { installHost } from './install.mjs';
 import { installClaudeStartup } from './claude-startup.mjs';
+import { installOpenCodeStartup } from './opencode-startup.mjs';
 
 const entry = fileURLToPath(import.meta.url);
 const { values, positionals } = parseArgs({ allowPositionals: true, options: {
@@ -64,9 +65,10 @@ try {
   } else {
     if (positionals.length !== 2 || !Object.hasOwn(hosts, host)) throw Error('Provide a known host and its verified package directory.');
     const result = await installHost({ host, directory, ...values });
-    if (host === 'claude-code' && typeof ZESIA_SETUP_PRIVATE_NODE !== 'undefined') {
+    const installStartup = { 'claude-code': installClaudeStartup, opencode: installOpenCodeStartup }[host];
+    if (installStartup && typeof ZESIA_SETUP_PRIVATE_NODE !== 'undefined') {
       try {
-        await installClaudeStartup({ directory: result.destination, entry, interpreter: process.execPath,
+        await installStartup({ directory: result.destination, entry, interpreter: process.execPath,
           privateInterpreter: ZESIA_SETUP_PRIVATE_NODE, locale });
         result.foregroundGuide = { state: 'installed' };
       } catch (error) {

@@ -1,59 +1,9 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { createReadStream } from 'node:fs';
-import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
-
-const bundlePrefix = '.zesia-first-use-';
+import { randomUUID } from 'node:crypto';
+import { lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { missing, stageGuideBundle } from './startup-bundle.mjs';
 const pluginRoot = '${CLAUDE_PLUGIN_ROOT}';
 const bundleEntry = 'zesia-setup.mjs';
-
-async function missing(path) {
-  try { return await lstat(path); }
-  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
-}
-
-async function fileDigest(path) {
-  const stat = await lstat(path);
-  if (!stat.isFile() || stat.nlink !== 1) throw Error('Expected a regular file in the Claude Code guide bundle.');
-  const digest = createHash('sha256');
-  for await (const chunk of createReadStream(path)) digest.update(chunk);
-  return digest.digest('hex');
-}
-
-async function stageBundle(directory, files) {
-  const name = bundlePrefix + createHash('sha256')
-    .update(JSON.stringify(files.map(({ name, digest }) => [name, digest]))).digest('hex');
-  const destination = join(directory, name);
-  async function verify(target) {
-    if (!(await lstat(target)).isDirectory()) throw Error('Unsafe Claude Code guide bundle directory.');
-    for (const file of files) {
-      if (await fileDigest(join(target, file.name)) !== file.digest)
-        throw Error('An installed Claude Code guide file was changed.');
-    }
-  }
-
-  if (await missing(destination)) {
-    await verify(destination);
-    return name;
-  }
-  const staged = await mkdtemp(join(directory, '.zesia-guide-'));
-  try {
-    for (const file of files) {
-      const target = join(staged, file.name);
-      await copyFile(file.path, target);
-      if (file.executable) await chmod(target, 0o700);
-    }
-    await verify(staged);
-    try { await rename(staged, destination); }
-    catch (error) {
-      if (!['EEXIST', 'ENOTEMPTY', 'EPERM'].includes(error.code) || !await missing(destination)) throw error;
-      await verify(destination);
-    }
-    return name;
-  } finally {
-    await rm(staged, { recursive: true, force: true });
-  }
-}
 
 async function readHooks(path) {
   const stat = await missing(path);
@@ -86,12 +36,7 @@ export async function installClaudeStartup({ directory, entry, interpreter, priv
       startup.some(group => !isObject(group) || !Array.isArray(group.hooks)))
     throw Error('Review the existing Claude Code hook settings before installing the guide.');
 
-  const files = [{ name: bundleEntry, path: entry }];
-  if (privateInterpreter) {
-    files.push({ name: 'node.exe', path: interpreter, executable: true });
-    files.push({ name: 'NODE-LICENSE', path: join(dirname(entry), 'NODE-LICENSE') });
-  }
-  const name = await stageBundle(directory, await Promise.all(files.map(async file => ({ ...file, digest: await fileDigest(file.path) }))));
+  const name = await stageGuideBundle({ directory, entry, interpreter, privateInterpreter });
   const root = pluginRoot + '/' + name;
   const handler = {
     type: 'command',

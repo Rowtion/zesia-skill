@@ -4,7 +4,7 @@ import { resolve, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { build } from 'esbuild';
 
-const version = '1.0.2';
+const version = '1.0.3';
 const native = process.argv.includes('--native');
 const platform = process.platform + '-' + process.arch;
 const name = 'zesia-setup-' + version + '-' + (native ? platform : 'node');
@@ -12,7 +12,10 @@ const out = resolve('dist/setup'), dir = join(out, name);
 await rm(dir, { recursive: true, force: true });
 await mkdir(dir, { recursive: true });
 const entry = join(dir, 'zesia-setup.mjs');
+const jsoncLicense = await readFile('node_modules/jsonc-parser/LICENSE.md', 'utf8');
 await build({ entryPoints: ['setup/cli.mjs'], outfile: entry, bundle: true, format: 'esm', platform: 'node', target: 'node20',
+  mainFields: ['module', 'main'],
+  banner: { js: '/*! jsonc-parser\n' + jsoncLicense.trim() + '\n*/' },
   define: { ZESIA_SETUP_PRIVATE_NODE: JSON.stringify(native) } });
 await copyFile('LICENSE', join(dir, 'LICENSE'));
 if (native) {
