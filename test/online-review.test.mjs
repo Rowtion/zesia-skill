@@ -263,3 +263,50 @@ test('concurrent configure across runtime instances cannot delete active send cl
   await rm(directory,{recursive:true,force:true});
  }
 });
+
+test('bounded discussion approval and stopping are explicit and keep the same authenticated binding', async () => {
+  const expiresAt = new Date(Date.now() + 60_000).toISOString();
+  const draft = { draftId: 'one', requestId: 'request', approvedHash: 'hash', destination: 'https://api.zesia.dev', expiresAt };
+  let permitted = false, stopped = false, release, started;
+  const inFlight = new Promise(resolve => { release = resolve; });
+  const sent = new Promise(resolve => { started = resolve; });
+  let sends = 0;
+  const runtime = {
+    async inspect() {
+      return { ...draft, status: sends ? 'sending' : 'prepared', discussionMaxRounds: 3, discussion: { canStop: permitted && !stopped } };
+    },
+    async send(id, hash, _description, options) {
+      assert.equal(id, draft.draftId);
+      assert.equal(hash, draft.approvedHash);
+      sends++;
+      permitted = options?.maxRounds === 3;
+      started();
+      await inFlight;
+    },
+    async stopDiscussion() { stopped = true; },
+  };
+  const bridge = await startOnlineReview({ runtime, draftId: draft.draftId });
+  try {
+    const key = new URLSearchParams(new URL(bridge.url).hash.slice(1)).get('key');
+    const { expiresAt: _omit, ...binding } = draft;
+    const call = (path, body, authorization = 'Bearer ' + key) => fetch('http://127.0.0.1:' + bridge.port + '/bridge/v1/' + path, {
+      method: 'POST', headers: { authorization, origin: 'https://zesia.dev', 'content-type': 'application/json' },
+      body: JSON.stringify({ ...binding, protocolVersion: 1, ...body }),
+    });
+    assert.equal((await call('approve', { maxRounds: 4 })).status, 400);
+    assert.equal((await call('stop-discussion')).status, 409);
+    assert.equal((await call('approve', { maxRounds: 3, arbitrary: true })).status, 400);
+    assert.equal((await call('approve', { maxRounds: 3 })).status, 202);
+    await sent;
+    assert.equal(permitted, true);
+    assert.equal((await call('approve', { maxRounds: 3 })).status, 202);
+    assert.equal((await call('stop-discussion', { approvedHash: 'other' })).status, 409);
+    assert.equal((await call('stop-discussion', {}, 'Bearer other')).status, 403);
+    assert.equal((await call('stop-discussion')).status, 200);
+    assert.equal(stopped, true);
+    assert.equal(sends, 1);
+  } finally {
+    release();
+    bridge.close();
+  }
+});
