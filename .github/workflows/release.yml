@@ -78,6 +78,14 @@ jobs:
           git -C dist/agent-plugin bundle create "$PWD/dist/zesia-agent-plugin.git.bundle" main
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
+          name: agent-plugin-candidate
+          path: |
+            dist/zesia-agent-plugin-*.zip
+            dist/zesia-agent-plugin-*.zip.sha256
+            dist/zesia-agent-plugin.git.bundle
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
           name: verified-release-assets
           path: |
             dist/*.zip
