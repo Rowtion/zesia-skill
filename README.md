@@ -51,3 +51,17 @@ Chrome loopback permission and local-host operation require actual verification.
 workspaces, other browsers and each host's real-session behavior have separate support gates;
 do not equate a binary build with universal host acceptance. Website code is trusted software
 that can access its own page memory; local-only draft handling is not a cryptographic claim.
+
+## One Agent Plugin for local clients
+
+The release workflow builds one Agent Plugins 1.0 ZIP from the public Skill and
+the five verified native artifacts. The generated dist/agent-plugin directory
+is the matching Git distribution tree for clients that install from a repository.
+Cursor, Copilot and Codex use the same Skill and pins. Their catalogs and reviews
+are independent. The Git tree is published from the verified release ZIP, and
+Codex takes the ZIP itself. Use the desktop-only listing for Codex.
+
+The plugin includes installation instructions and per-platform Runtime checksums.
+The separately released Setup 1.1.0 installs the verified executable and its
+bundled A2A CLI in a versioned user directory. Installation, Skill discovery and
+the first consultation are separate checks. Existing Skill paths remain available.

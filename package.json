@@ -1,6 +1,6 @@
 {
   "name": "@zesia/runtime",
-  "version": "0.4.13",
+  "version": "0.4.14",
   "private": true,
   "type": "module",
   "repository": {
@@ -8,14 +8,16 @@
     "url": "https://github.com/Rowtion/zesia-skill.git"
   },
   "devDependencies": {
-    "esbuild": "0.25.12"
+    "esbuild": "0.25.12",
+    "fflate": "0.8.3"
   },
   "scripts": {
     "test": "node --test runtime.test.mjs test/*.test.mjs",
     "build": "node scripts/build.mjs",
     "package": "node scripts/package.mjs",
     "install:a2a": "node scripts/install-a2a.mjs",
-    "build:native": "node scripts/build-native.mjs"
+    "build:native": "node scripts/build-native.mjs",
+    "package:agent-plugin": "node scripts/package-agent-plugin.mjs"
   },
   "exports": {
     "./a2a": "./runtime/a2a.mjs",

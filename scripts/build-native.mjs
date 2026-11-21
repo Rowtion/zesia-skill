@@ -1,3 +1,4 @@
+import { runtimePlatforms } from './native-platforms.mjs';
 import {execFileSync} from 'node:child_process';
 import {readFile,writeFile,mkdir,rm,copyFile,readdir,stat} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
@@ -6,7 +7,7 @@ import {installA2A} from './install-a2a.mjs';
 const root=resolve(import.meta.dirname,'..');
 const pkg=JSON.parse(await readFile(join(root,'package.json'),'utf8'));
 const target=process.platform+'-'+process.arch;
-if(!['darwin-arm64','darwin-x64','linux-arm64','linux-x64','win32-x64'].includes(target))throw Error('Unsupported standalone platform: '+target);
+if(!runtimePlatforms.includes(target))throw Error('Unsupported standalone platform: '+target);
 const dirty=Boolean(execFileSync('git',['status','--porcelain','--untracked-files=all'],{cwd:root,encoding:'utf8'}).trim());
 if(dirty&&!process.argv.includes('--allow-dirty'))throw Error('Commit public source before producing a release asset.');
 const sourceSha=execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).trim();

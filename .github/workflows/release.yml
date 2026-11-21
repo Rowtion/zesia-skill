@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       confirmation:
-        description: Type release to publish the version in package.json
+        description: Type candidate to build preview artifacts, or release to publish from main
         required: true
         type: string
 permissions:
@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   package:
-    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'release'
+    if: inputs.confirmation == 'candidate' || (github.ref == 'refs/heads/main' && inputs.confirmation == 'release')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -29,7 +29,7 @@ jobs:
           name: javascript
           path: dist/*.*
   native:
-    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'release'
+    if: inputs.confirmation == 'candidate' || (github.ref == 'refs/heads/main' && inputs.confirmation == 'release')
     strategy:
       fail-fast: false
       matrix:
@@ -56,8 +56,47 @@ jobs:
         with:
           name: native-${{ matrix.os }}
           path: dist/zesia-runtime-*
-  publish:
+  assemble:
     needs: [package, native]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Verify and assemble identical ZIP and Git distribution trees
+        run: |
+          node scripts/verify-native-assets.mjs
+          npm run package:agent-plugin
+          git -C dist/agent-plugin init --initial-branch=main
+          git -C dist/agent-plugin add -A
+          git -C dist/agent-plugin -c user.name=ZESIA -c user.email=dev@zesia.dev commit -m "ZESIA Consult plugin from $GITHUB_SHA"
+          git -C dist/agent-plugin bundle create "$PWD/dist/zesia-agent-plugin.git.bundle" main
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: agent-plugin-candidate
+          path: |
+            dist/zesia-agent-plugin-*.zip
+            dist/zesia-agent-plugin-*.zip.sha256
+            dist/zesia-agent-plugin.git.bundle
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: verified-release-assets
+          path: |
+            dist/*.zip
+            dist/*.json
+            dist/*.sha256
+            dist/*.tgz
+            dist/*.bundle
+          if-no-files-found: error
+  publish:
+    if: github.ref == 'refs/heads/main' && inputs.confirmation == 'release'
+    needs: assemble
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -68,13 +107,12 @@ jobs:
           node-version: '24'
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
+          name: verified-release-assets
           path: dist
-          merge-multiple: true
       - name: Publish immutable source-bound assets only after every platform passed
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          node scripts/verify-native-assets.mjs
           VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("package.json","utf8")).version')
           if gh release view "v$VERSION" >/dev/null 2>&1; then
             echo 'This version already exists. Bump package.json before publishing.' >&2
