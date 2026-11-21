@@ -4,7 +4,7 @@ import { resolve, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { build } from 'esbuild';
 
-const version = '1.0.0';
+const version = '1.1.0';
 const native = process.argv.includes('--native');
 const platform = process.platform + '-' + process.arch;
 const name = 'zesia-setup-' + version + '-' + (native ? platform : 'node');
@@ -14,6 +14,7 @@ await mkdir(dir, { recursive: true });
 const entry = join(dir, 'zesia-setup.mjs');
 await build({ entryPoints: ['setup/cli.mjs'], outfile: entry, bundle: true, format: 'esm', platform: 'node', target: 'node20' });
 await copyFile('LICENSE', join(dir, 'LICENSE'));
+await copyFile('node_modules/fflate/LICENSE', join(dir, 'FFLATE-LICENSE'));
 if (native) {
   const upstream = '24.22.3';
   const hashes = {

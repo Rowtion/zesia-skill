@@ -14,7 +14,15 @@ try {
   let value;
   if(command==='prepare')value=await runtime.prepare(JSON.parse(await readFile(id,'utf8')));
   else if(command==='send')value=await runtime.send(id,hash,await readFile(confirmationFile,'utf8'));
-  else if(command==='result')value=await runtime.result(id,{markReceived:true});
+  else if(command==='result'){
+    if(hash && hash!=='--defer-receipt')throw Error('Use result <draftId> [--defer-receipt].');
+    value=await runtime.result(id,{markReceived:hash!=='--defer-receipt'});
+  }
+  else if(command==='receipt'){
+    const result=await runtime.result(id,{markReceived:true});
+    if(result.status!=='completed'||!result.agentReceivedAt)throw Error('The result is not ready for a receipt.');
+    value={ok:true,draftId:id,agentReceivedAt:result.agentReceivedAt};
+  }
   else if(command==='diagnose')value=await runtime.diagnose(id);
   else if(command==='list')value=await runtime.list();
   else if(command==='clean'){
@@ -90,7 +98,7 @@ try {
     while(true){value=await runtime.result(id,{markReceived:true});if(value.status==='completed'||value.code==='cancelled'||(!value.pending&&(value.retryAllowed===false||value.outcome))||Date.now()>=until)break;await pause(500);}
     if(value.code==='result_unavailable')value={ok:true,status:value.status,draftId:id,pending:true,hint:'The local result is not ready. Use result later; do not send or prepare a duplicate.'};
   }
-  else if(command==='--help')value={commands:['configure [--token-file <file>]','install [--project <dir>] [--upgrade]','profile [export | set <id> "<text>" --quote "<sourceQuote>" | rm <id>]','prepare <packet.json>','review <draftId> [--no-open]','wait <draftId> [seconds:1-900]','result <draftId>','diagnose <draftId>','list','clean [--apply] [--all] [--days <N>]','followup <draftId> <answers.json>','send <draftId> <approvedHash> <confirmation.txt> (legacy explicit-confirmation interface)'],note:'Installation defaults to user scope under $HOME (no administrator access); pass --project <dir> for project scope. Preparation is local. Use review for the shared zesia.dev window. Only its approval sends materials.'};
+  else if(command==='--help')value={commands:['configure [--token-file <file>]','install [--project <dir>] [--upgrade]','profile [export | set <id> "<text>" --quote "<sourceQuote>" | rm <id>]','prepare <packet.json>','review <draftId> [--no-open]','wait <draftId> [seconds:1-900]','result <draftId> [--defer-receipt]','receipt <draftId>','diagnose <draftId>','list','clean [--apply] [--all] [--days <N>]','followup <draftId> <answers.json>','send <draftId> <approvedHash> <confirmation.txt> (legacy explicit-confirmation interface)'],note:'Installation defaults to user scope under $HOME (no administrator access); pass --project <dir> for project scope. Preparation is local. Use review for the shared zesia.dev window. Only its approval sends materials.'};
   else throw Error('Unknown command. Run with --help.');
   if(['prepare','followup'].includes(command)&&value){delete value.packet;value.hint='Materials are prepared locally. Open review, then wait for the result. Do not paste or send the packet from chat.';}
   if(value!==undefined&&!['serve-review','serve-online-review'].includes(command))console.log(JSON.stringify(value,null,2));

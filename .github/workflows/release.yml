@@ -75,6 +75,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           node scripts/verify-native-assets.mjs
+          npm run package:agent-plugin
           VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("package.json","utf8")).version')
           if gh release view "v$VERSION" >/dev/null 2>&1; then
             echo 'This version already exists. Bump package.json before publishing.' >&2

@@ -57,7 +57,7 @@ test('shipped CLI finishes provisioning before opening; bridge survives installe
   const { dir, env } = await fixture(t);
   const node = process.execPath, native = process.env.ZESIA_TEST_SETUP_NATIVE;
   const platform = process.platform + '-' + process.arch;
-  const packageDir = resolve('dist/setup/zesia-setup-1.0.0-' + platform);
+  const packageDir = resolve('dist/setup/zesia-setup-1.1.0-' + platform);
   const executable = native ? join(packageDir, process.platform === 'win32' ? 'node.exe' : 'node') : node;
   const prefix = [native ? join(packageDir, 'zesia-setup.mjs') : fileURLToPath(new URL('../setup/cli.mjs', import.meta.url))];
   const run = (...args) => JSON.parse(execFileSync(executable, [...prefix, 'portable', dir, '--no-open', ...args],
