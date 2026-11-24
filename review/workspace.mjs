@@ -89,7 +89,6 @@ export async function startWorkspaceReview({
           || requestedHeaders.some(value => !['authorization', 'content-type'].includes(value))) return reply(403, { ok: false });
         response.writeHead(204, { ...headers, 'access-control-allow-methods': 'GET, POST',
           'access-control-allow-headers': 'Authorization, Content-Type',
-          ...(request.headers['access-control-request-private-network'] === 'true' && { 'access-control-allow-private-network': 'true' }),
         });
         return response.end();
       }
