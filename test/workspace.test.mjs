@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, createPublicKey, randomBytes, verify } from 'node:crypto';
 import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -102,6 +102,57 @@ for (const mode of ['the recovery window', 'immediate cleanup', 'a lost cleanup 
   assert.equal(handback.artifacts[0].bytes, bytes.length);
   assert.deepEqual(await readFile(handback.artifacts[0].path), bytes);
   assert.equal(paths.filter(action => action === 'session').length, mode === 'the recovery window' ? 2 : 4);
+});
+
+test('the BYO driver signs a fixed operation for the approved room and never repeats an unknown send', async t => {
+  const { store } = await workspace(t);
+  const scopeHash = 'a'.repeat(64);
+  const writes = [];
+  let signer;
+  let admission;
+  let approved = false;
+  const group = createGroupWorkflow({ store, configuration, async fetchRequest(url, options) {
+    const target = new URL(url);
+    assert.equal(target.origin, origin);
+    const [, roomId, path] = /\/rooms\/([^/]+)\/(.+)$/u.exec(target.pathname);
+    if (path === 'session') return Response.json({
+      room: { roomId, stage: approved ? 'workspace_swarm' : 'direct_consult', approvedScopeHash: scopeHash },
+      admissionBinding: { requestId: admission.requestId, keyFingerprint: admission.identity.keyFingerprint },
+    });
+    const value = JSON.parse(options.body);
+    if (path === 'admission') {
+      assert.equal(value.admission.workspaceMode, 'byo_agent');
+      admission = value.admission;
+      signer = createPublicKey({ key: Buffer.from(value.admission.identity.publicKeySpki, 'base64url'), type: 'spki', format: 'der' });
+      return Response.json({ roomId }, { status: 202 });
+    }
+    writes.push({ path, id: value.commandId });
+    const body = { commandId: value.commandId, protocol: value.protocol, scopeHash: value.scopeHash };
+    assert.equal(value.protocol, 'zesia.driver.v1');
+    const signed = sha(JSON.stringify(['zesia.room.caller-command.v1', roomId, path, body]));
+    assert.equal(verify('sha256', Buffer.from(signed), { key: signer, dsaEncoding: 'ieee-p1363' },
+      Buffer.from(options.headers['x-zesia-room-signature'], 'base64url')), true);
+    if (path === 'driver/exec') throw Error('Transport disconnected after sending');
+    if (path === 'driver/consult') return Response.json({ ok: false, code: 'request_budget_exceeded' }, { status: 429 });
+    return Response.json({ ok: true, scopeHash });
+  } });
+  const roomId = await group.stage(packet, { workspaceMode: 'byo_agent' });
+  const data = { scopeHash, commandId: 'join-test' };
+  await assert.rejects(group.driverOperation(roomId, 'join', data), /approve/u);
+  assert.deepEqual(writes, []);
+  const { admission: preview } = group.preview(roomId);
+  await group.decision({ id: roomId, approved: true, approvalHash: preview.approvalHash, proof: randomBytes(40).toString('base64url') });
+  assert.equal((await group.driverOperation(roomId, 'join', { commandId: data.commandId })).code, 'room_workspace_approval_required');
+  approved = true;
+  assert.equal((await group.driverOperation(roomId, 'join', { commandId: data.commandId })).scopeHash, scopeHash);
+  await assert.rejects(group.driverOperation(roomId, 'tools/list_changed', data), /supported driver operation/u);
+  const lost = await group.driverOperation(roomId, 'exec', { ...data, commandId: 'write-test' });
+  assert.equal(lost.outcome, 'unknown');
+  assert.equal(lost.operationId, 'write-test');
+  const refused = await group.driverOperation(roomId, 'consult', { ...data, commandId: 'consult-test' });
+  assert.equal(refused.code, 'request_budget_exceeded');
+  assert.deepEqual(writes, [{ path: 'driver/join', id: 'join-test' }, { path: 'driver/exec', id: 'write-test' },
+    { path: 'driver/consult', id: 'consult-test' }]);
 });
 
 test('Workspace bridge scopes reads to loopback origin and capability', async t => {

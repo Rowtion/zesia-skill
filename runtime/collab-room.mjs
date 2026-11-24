@@ -18,6 +18,8 @@ const iso = value => new Date(value).toISOString();
 const SIGN_OPTIONS = { dsaEncoding: 'ieee-p1363' };
 const maxArtifacts = 128;
 const maxOutputBytes = 2 * 1024 * 1024;
+const driverProtocol = 'zesia.driver.v1';
+const driverOperations = new Set(['join', 'sync', 'exec', 'consult', 'submit_verify']);
 
 // The room contract digests the exact canonical, validated packet. Keep
 // whitespace-sensitive quotes as entered and trim only fields trimmed by the contract.
@@ -93,20 +95,23 @@ async function boundedBytes(response, expected) {
 export function createGroupWorkflow({ store, configuration, fetchRequest = fetch, now = Date.now, trustedHost } = {}) {
   const active = new Map();
 
-  async function send(group, path, options = {}) {
+  async function send(group, path, options = {}, { timeoutMs = 15_000, allowRoomError = false } = {}) {
     const config = await configuration();
     if (destinationOf(config.url) !== group.origin || !config.token) throw Error('Restore the approved destination and account.');
     const response = await fetchRequest(group.admission.destination.url.replace(/\/admission$/u, '/' + path), {
       ...options, headers: { authorization: 'Bearer ' + config.token, ...options.headers },
-      redirect: 'error', signal: AbortSignal.timeout(15_000),
+      redirect: 'error', signal: AbortSignal.timeout(timeoutMs),
     });
-    if (!response.ok && !(path === 'session' && [404, 410].includes(response.status))) {
+    if (!response.ok && !allowRoomError && !(path === 'session' && [404, 410].includes(response.status))) {
       throw Error('The cloud room did not confirm this operation.');
     }
     return response;
   }
 
-  async function stage(input) {
+  async function stage(input, { workspaceMode } = {}) {
+    if (workspaceMode !== undefined && !['byo_agent', 'platform_managed'].includes(workspaceMode)) {
+      throw Error('Unknown workspace mode.');
+    }
     const packet = groupPacket(input);
     const origin = destinationOf((await configuration()).url);
     const requestId = 'zrq-' + now() + '-' + randomUUID();
@@ -125,6 +130,7 @@ export function createGroupWorkflow({ store, configuration, fetchRequest = fetch
         materialId: file.id, name: file.name, kind: file.kind, mediaType: file.mediaType, bytes: file.bytes.length, sha256: sha(file.bytes),
       })),
       packetSha256: digest(packet), maxRounds: 3, maxMicros: 5_000_000,
+      ...(workspaceMode !== undefined && { workspaceMode }),
     };
     admission.approvalHash = digest(admission);
     const group = { roomId, packet, files, origin, admission, key: key.privateKey, status: 'prepared' };
@@ -136,6 +142,45 @@ export function createGroupWorkflow({ store, configuration, fetchRequest = fetch
 
   const groupUrl = group => group.origin + '/consult?room=' + group.roomId;
   const signFor = (group, value) => sign('sha256', Buffer.from(digest(value)), { key: group.key, ...SIGN_OPTIONS }).toString('base64url');
+
+  async function driverOperation(roomId, operation, payload) {
+    const group = active.get(roomId);
+    if (group?.admission.workspaceMode !== 'byo_agent' || group.status !== 'active') {
+      throw Error('Open and approve a BYO-Agent draft before using the driver.');
+    }
+    if (!driverOperations.has(operation) || !payload || Array.isArray(payload) || typeof payload !== 'object'
+      || typeof payload.commandId !== 'string' || !id.test(payload.commandId)
+      || (payload.scopeHash !== undefined && (typeof payload.scopeHash !== 'string' || !hash.test(payload.scopeHash)))) {
+      throw Error('Use a supported driver operation with a stable command ID and approved scope.');
+    }
+    let scopeHash = payload.scopeHash;
+    if (!scopeHash) {
+      const session = await (await send(group, 'session')).json();
+      if (session.room?.roomId !== group.roomId || session.admissionBinding?.requestId !== group.admission.requestId
+        || session.admissionBinding?.keyFingerprint !== group.admission.identity.keyFingerprint) {
+        throw Error('Unexpected cloud room identity.');
+      }
+      if (session.room.stage !== 'workspace_swarm' || !hash.test(session.room.approvedScopeHash ?? '')) {
+        return { ok: false, operationId: payload.commandId, outcome: 'not_started', code: 'room_workspace_approval_required' };
+      }
+      scopeHash = session.room.approvedScopeHash;
+    }
+    const path = 'driver/' + operation;
+    const body = { ...payload, protocol: driverProtocol, scopeHash };
+    const signature = signFor(group, ['zesia.room.caller-command.v1', group.roomId, path, body]);
+    const unknown = { ok: false, operationId: payload.commandId, outcome: 'unknown', code: 'room_driver_transport_unknown' };
+    let response, result;
+    try {
+      response = await send(group, path, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-zesia-room-signature': signature },
+        body: JSON.stringify(body),
+      }, { timeoutMs: 90_000, allowRoomError: true });
+      result = await response.json();
+    } catch { return unknown; }
+    if (!response.ok) return { ...(response.status >= 500 ? unknown : { ...unknown, outcome: 'not_started' }),
+      code: typeof result?.code === 'string' && id.test(result.code) ? result.code : unknown.code, status: response.status };
+    return result?.ok === true ? result : unknown;
+  }
 
   async function decision({ id: roomId, approvalHash, approved, proof }) {
     const group = active.get(roomId);
@@ -210,7 +255,7 @@ export function createGroupWorkflow({ store, configuration, fetchRequest = fetch
     if (session.room?.roomId !== group.roomId || session.admissionBinding?.requestId !== group.admission.requestId
       || session.admissionBinding?.keyFingerprint !== group.admission.identity.keyFingerprint) throw Error('Unexpected cloud room identity.');
     group.status = 'active';
-    if (group.awaitingRetirement) return;
+    if (group.awaitingRetirement || group.admission.workspaceMode === 'byo_agent') return;
     if (!session.result?.receiptId || !id.test(session.result.receiptId)) return;
     const diagnosis = session.result.diagnosis;
     if (diagnosis && (session.room.lifecycle?.state !== 'blocked'
@@ -262,7 +307,7 @@ export function createGroupWorkflow({ store, configuration, fetchRequest = fetch
   }
 
   return {
-    stage, decision, admitTrusted,
+    stage, decision, admitTrusted, driverOperation,
     list: () => Array.from(active.values(), group => ({
       id: group.roomId, kind: group.status === 'prepared' ? 'draft' : 'group', title: group.admission.goal.title,
       status: group.status, groupDraft: group.status === 'prepared', updatedAt: group.admission.expiresAt,
