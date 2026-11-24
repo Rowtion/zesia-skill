@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createWorkspaceStore } from '../runtime/workspace.mjs';
+import { trustedHostIdentity } from '../runtime/trusted-host.mjs';
 import { createGroupWorkflow } from '../runtime/collab-room.mjs';
 import { ONLINE_ORIGINS, startOnlineReview } from './online.mjs';
 
@@ -25,13 +26,17 @@ async function jsonBody(request) {
 
 export async function startWorkspaceReview({
   runtime, origin = 'https://zesia.dev', store = createWorkspaceStore(), configuration, groupPacket,
-  group = createGroupWorkflow({ store, configuration }), idleMs = 15 * 60_000,
+  group, identify = trustedHostIdentity, idleMs = 15 * 60_000,
 } = {}) {
   if (!workspaceOrigins.has(origin)) throw Error('The workspace origin is not supported.');
   if (groupPacket && new URL((await configuration()).url).origin !== origin) {
     throw Error('Open group review on the same origin as the configured Consult Worker.');
   }
+  const configured = await configuration?.().catch(() => undefined);
+  const trustedHost = configured?.url === origin ? await identify(origin).catch(() => undefined) : undefined;
+  group ??= createGroupWorkflow({ store, configuration, trustedHost });
   const selectedDraft = groupPacket ? await group.stage(groupPacket) : '';
+  const trustedAdmission = selectedDraft ? await group.admitTrusted?.(selectedDraft) : undefined;
   const secret = randomBytes(32).toString('base64url');
   const expected = Buffer.from('Bearer ' + secret);
   let host;
@@ -96,6 +101,9 @@ export async function startWorkspaceReview({
       lastActivity = Date.now();
       const url = new URL(request.url, 'http://' + host);
       const path = url.pathname;
+      if (request.method === 'GET' && path === '/bridge/v1/workspace/trusted-host' && trustedHost) {
+        return reply(200, { host: trustedHost.host, installation: trustedHost.installation, origin });
+      }
       if (request.method === 'GET' && path === '/bridge/v1/workspace') {
         return reply(200, { version: 1, sessions: await inventory() });
       }
@@ -152,5 +160,6 @@ export async function startWorkspaceReview({
   }, 3_000);
   const query = selectedDraft ? '?' + new URLSearchParams({ draft: selectedDraft }) : '';
   const fragment = new URLSearchParams({ workspace: '1', port: String(port), key: secret });
-  return { url: origin + '/consult' + query + '#' + fragment, groupId: selectedDraft || undefined, close };
+  return { url: (trustedAdmission?.url ?? origin + '/consult' + query) + '#' + fragment,
+    groupId: selectedDraft || undefined, status: trustedAdmission?.confirming ? 'confirming' : trustedAdmission ? 'active' : 'awaiting_confirmation', close };
 }

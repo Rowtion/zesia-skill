@@ -123,6 +123,10 @@ export async function workspaceGroupResult(store, roomId) {
   const value = await store.read('group', roomId).catch(error => {
     if (error.code !== 'ENOENT') throw error;
   });
+  if (value?.status === 'blocked' && value.result?.receiptId && value.result?.diagnosis) {
+    return { ok: true, roomId, status: 'blocked', receiptId: value.result.receiptId,
+      diagnosis: value.result.diagnosis, retryAllowed: false };
+  }
   if (value?.status !== 'completed' || !value.result?.receiptId) {
     return { ok: true, roomId, status: 'pending', retryAllowed: false };
   }
