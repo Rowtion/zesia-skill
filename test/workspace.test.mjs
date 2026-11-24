@@ -4,7 +4,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createWorkspaceStore } from '../runtime/workspace.mjs';
+import { createWorkspaceStore, workspaceGroupResult } from '../runtime/workspace.mjs';
 import { createGroupWorkflow } from '../runtime/collab-room.mjs';
 import { startWorkspaceReview } from '../review/workspace.mjs';
 
@@ -64,6 +64,7 @@ test('Group stores verified artifacts and audit before acknowledging the exact c
   } });
   const roomId = await group.stage(packet);
   const preview = group.preview(roomId);
+  assert.equal((await workspaceGroupResult(store, roomId)).status, 'pending');
   assert.deepEqual(paths, []);
   assert.equal(preview.materials[0].text, packet.context.materials[0].content);
   const staged = JSON.parse(await readFile(join(directory, 'workspace-v1', 'draft', roomId + '.json'), 'utf8'));
@@ -82,6 +83,11 @@ test('Group stores verified artifacts and audit before acknowledging the exact c
   assert.equal(paths.filter(action => action === 'handback').length, 1);
   assert.equal(group.list().length, 0);
   assert.equal((await store.list()).length, 1);
+  const handback = await workspaceGroupResult(store, roomId);
+  assert.equal(handback.receiptId, 'archive');
+  assert.equal(handback.artifacts[0].bytes, bytes.length);
+  assert.deepEqual(await readFile(handback.artifacts[0].path), bytes);
+  assert.equal(paths.filter(action => action === 'session').length, 2);
 });
 
 test('Workspace bridge scopes reads to loopback origin and capability', async t => {

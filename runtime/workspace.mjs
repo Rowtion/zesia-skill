@@ -114,7 +114,22 @@ export function createWorkspaceStore(root = defaultWorkspaceDir()) {
       const group = await directory(join(parent, checkedId(roomId)));
       const bytes = await readBounded(join(group, ref.sha256), 2 * 1024 * 1024);
       if (bytes.length !== ref.bytes || digest(bytes) !== ref.sha256) throw Error('Workspace artifact integrity check failed.');
-      return { ...ref, bytes };
+      return { ...ref, bytes, path: join(group, ref.sha256) };
     },
   };
+}
+
+export async function workspaceGroupResult(store, roomId) {
+  const value = await store.read('group', roomId).catch(error => {
+    if (error.code !== 'ENOENT') throw error;
+  });
+  if (value?.status !== 'completed' || !value.result?.receiptId) {
+    return { ok: true, roomId, status: 'pending', retryAllowed: false };
+  }
+  const artifacts = await Promise.all((value.artifacts ?? []).map(async item => {
+    const { bytes, ...ref } = await store.readArtifact(roomId, item.artifactId);
+    return { ...ref, bytes: bytes.length };
+  }));
+  return { ok: true, roomId, status: 'completed', receiptId: value.result.receiptId,
+    text: value.result.text, artifacts };
 }

@@ -85,3 +85,5 @@ Profile.
 ## Local workspace and group review
 
 Use `zesia workspace` to open the local session list. For an explicitly requested group that needs a verifiable deliverable, prepare an ordinary Consult packet and open it with `zesia workspace --group <packet.json>` on a supported, configured room endpoint. The user reviews and approves the materials in the browser. Keep the local runtime available for verified result handback. For a request that one expert can answer directly, use the normal Consult workflow.
+
+Capture the group ID from the workspace launch. Use `zesia workspace-result <groupId> [seconds]` to return the verified local result and artifact paths to the original conversation. A pending result calls for checking the same group ID again.
