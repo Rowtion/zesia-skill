@@ -100,7 +100,9 @@ export function createGroupWorkflow({ store, configuration, fetchRequest = fetch
       ...options, headers: { authorization: 'Bearer ' + config.token, ...options.headers },
       redirect: 'error', signal: AbortSignal.timeout(15_000),
     });
-    if (!response.ok) throw Error('The cloud room did not confirm this operation.');
+    if (!response.ok && !(path === 'session' && [404, 410].includes(response.status))) {
+      throw Error('The cloud room did not confirm this operation.');
+    }
     return response;
   }
 
@@ -164,10 +166,24 @@ export function createGroupWorkflow({ store, configuration, fetchRequest = fetch
   }
 
   async function archive(group) {
-    const session = await (await send(group, 'session')).json();
+    const response = await send(group, 'session');
+    const session = await response.json();
+    if (!response.ok) {
+      if (response.status === 410 && session.code === 'room_cloud_copy_cleaning') return;
+      if (response.status !== 404 || session.code !== 'room_cloud_copy_purged') {
+        throw Error('The cloud room did not confirm this operation.');
+      }
+      const saved = await store.read('group', group.roomId);
+      if (saved.status === 'completed' && saved.result?.receiptId && saved.snapshot?.room?.roomId === group.roomId) {
+        await store.save({ ...saved, updatedAt: iso(now()), cloudCopy: { ...saved.cloudCopy, state: 'purged' } });
+        active.delete(group.roomId);
+      }
+      return;
+    }
     if (session.room?.roomId !== group.roomId || session.admissionBinding?.requestId !== group.admission.requestId
       || session.admissionBinding?.keyFingerprint !== group.admission.identity.keyFingerprint) throw Error('Unexpected cloud room identity.');
     group.status = 'active';
+    if (group.awaitingRetirement) return;
     if (!session.result?.receiptId || !id.test(session.result.receiptId)) return;
     const refs = session.result.artifacts ?? [];
     if (!Array.isArray(refs) || refs.length > maxArtifacts) throw Error('Invalid cloud artifacts.');
@@ -205,6 +221,10 @@ export function createGroupWorkflow({ store, configuration, fetchRequest = fetch
         body: JSON.stringify(value),
       })).json();
       await store.save({ ...saved, cloudCopy: { expiresAt: ack.expiresAt, acknowledgedAt: ack.acknowledgedAt } });
+      if (ack.acknowledgedAt && ack.expiresAt === ack.acknowledgedAt) {
+        group.awaitingRetirement = true;
+        return;
+      }
     }
     active.delete(group.roomId);
   }

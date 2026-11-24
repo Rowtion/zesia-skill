@@ -21,13 +21,16 @@ async function workspace(t) {
   return { directory, store: createWorkspaceStore(directory) };
 }
 
-test('Group stores verified artifacts and audit before acknowledging the exact cloud receipt', async t => {
+for (const mode of ['the recovery window', 'immediate cleanup', 'a lost cleanup acknowledgement']) test('Group verifies local handback with ' + mode, async t => {
   const { directory, store } = await workspace(t);
   const bytes = Buffer.from('{"total":3}');
   const ref = { artifactId: 'summary', objectVersion: 'version-1', sha256: sha(bytes), bytes: bytes.length, mediaType: 'application/json' };
   const paths = [];
   let admission;
   let correctArtifact = false;
+  let cleaning = false;
+  let purged = false;
+  const acknowledgedAt = '2026-11-24T05:00:00.000Z';
   const group = createGroupWorkflow({ store, configuration, async fetchRequest(url, options) {
     const current = new URL(url);
     assert.equal(current.origin, origin);
@@ -41,7 +44,8 @@ test('Group stores verified artifacts and audit before acknowledging the exact c
         assert.equal(body.signature.length, 86);
         return Response.json({ roomId }, { status: 202 });
       }
-      case 'session': return Response.json({
+      case 'session': return purged ? Response.json({ code: 'room_cloud_copy_purged' }, { status: 404 })
+        : cleaning ? Response.json({ code: 'room_cloud_copy_cleaning' }, { status: 410 }) : Response.json({
         room: { roomId }, admissionBinding: { requestId: admission.requestId, keyFingerprint: admission.identity.keyFingerprint },
         result: { receiptId: 'archive', text: 'Done', artifacts: [ref] }, cloudCopy: {},
       });
@@ -57,7 +61,10 @@ test('Group stores verified artifacts and audit before acknowledging the exact c
         assert.equal(options.headers['x-zesia-room-signature'].length, 86);
         assert.deepEqual((await store.readArtifact(roomId, 'summary')).bytes, bytes);
         assert.deepEqual((await store.read('group', roomId)).events, [{ seq: 1, type: 'archive.verified' }]);
-        return Response.json({ expiresAt: '2026-11-24T06:00:00.000Z', acknowledgedAt: '2026-11-24T05:00:00.000Z' });
+        if (mode === 'the recovery window') return Response.json({ expiresAt: '2026-11-24T06:00:00.000Z', acknowledgedAt });
+        cleaning = true;
+        if (mode === 'a lost cleanup acknowledgement') throw Error('Synthetic lost acknowledgement');
+        return Response.json({ expiresAt: acknowledgedAt, acknowledgedAt });
       }
       default: assert.fail('Unexpected operation');
     }
@@ -78,7 +85,14 @@ test('Group stores verified artifacts and audit before acknowledging the exact c
   await group.sync();
   const saved = await store.read('group', roomId);
   assert.equal(saved.artifacts[0].filename, 'summary.json');
-  assert.ok(saved.cloudCopy.acknowledgedAt);
+  assert.equal(saved.cloudCopy?.acknowledgedAt, mode === 'a lost cleanup acknowledgement' ? undefined : acknowledgedAt);
+  if (mode !== 'the recovery window') {
+    await group.sync();
+    assert.equal((await store.read('group', roomId)).cloudCopy?.state, undefined);
+    purged = true;
+    await group.sync();
+    assert.equal((await store.read('group', roomId)).cloudCopy.state, 'purged');
+  }
   assert.equal(paths.filter(action => action === 'admission').length, 1);
   assert.equal(paths.filter(action => action === 'handback').length, 1);
   assert.equal(group.list().length, 0);
@@ -87,7 +101,7 @@ test('Group stores verified artifacts and audit before acknowledging the exact c
   assert.equal(handback.receiptId, 'archive');
   assert.equal(handback.artifacts[0].bytes, bytes.length);
   assert.deepEqual(await readFile(handback.artifacts[0].path), bytes);
-  assert.equal(paths.filter(action => action === 'session').length, 2);
+  assert.equal(paths.filter(action => action === 'session').length, mode === 'the recovery window' ? 2 : 4);
 });
 
 test('Workspace bridge scopes reads to loopback origin and capability', async t => {
