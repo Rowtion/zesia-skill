@@ -2,7 +2,7 @@ import { constants } from 'node:fs';
 import { mkdir, open, readdir, rename, lstat, unlink } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 export const WORKSPACE_FORMAT = 'zesia.workspace.session.v1';
 export const defaultWorkspaceDir = () => process.env.ZESIA_WORKSPACE_DIR || join(homedir(), '.zesia');
@@ -42,6 +42,10 @@ async function writeAtomic(path, data) {
     await handle.sync();
     await handle.close();
     await rename(temp, path);
+    if (process.platform !== 'win32') {
+      const parent = await open(dirname(path), 'r');
+      try { await parent.sync(); } finally { await parent.close(); }
+    }
   } finally {
     await handle.close().catch(() => {});
     await unlink(temp).catch(error => { if (error.code !== 'ENOENT') throw error; });
