@@ -1,7 +1,9 @@
 import {readFile,access} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import {setTimeout as pause} from 'node:timers/promises';
-import {createPortable} from './runtime.mjs';
+import {createPortable,portableEnvironment} from './runtime.mjs';
+import {readConfig} from './runtime/config.mjs';
+import {startWorkspaceReview} from './review/workspace.mjs';
 import {startReview,openReviewBrowser} from './review/server.mjs';
 import {launchReview} from './review/launch.mjs';
 import {startOnlineReview,openOnlineBrowser} from './review/online.mjs';
@@ -47,6 +49,19 @@ try {
       if(args.length!==2||!args[1])throw Error('Use: zesia profile rm <id>.');
       value=await runtime.removeProfile(args[1]);
     }else throw Error('Use: zesia profile [export | set <id> "<text>" --quote "<sourceQuote>" | rm <id>].');
+  }
+  else if(command==='workspace'){
+    if(id && (id!=='--group' || !hash || confirmationFile))throw Error('Use workspace [--group <packet.json>].');
+    const configuration=()=>readConfig(portableEnvironment(),{requireToken:false});
+    const groupPacket=id ? JSON.parse(await readFile(hash,'utf8')) : undefined;
+    const origin=process.env.ZESIA_UI_ORIGIN || (groupPacket ? (await configuration()).url : 'https://zesia.dev');
+    const workspace=await startWorkspaceReview({runtime,configuration,origin,groupPacket});
+    if(!await openOnlineBrowser(workspace.url)){
+      workspace.close();
+      throw Error('The local workspace could not be opened in your browser.');
+    }
+    process.once('SIGINT',workspace.close);
+    process.once('SIGTERM',workspace.close);
   }
   else if(command==='review'){
     if(hash && hash!=='--no-open')throw Error('Use review <draftId> [--no-open].');
@@ -98,7 +113,7 @@ try {
     while(true){value=await runtime.result(id,{markReceived:true});if(value.status==='completed'||value.code==='cancelled'||(!value.pending&&(value.retryAllowed===false||value.outcome))||Date.now()>=until)break;await pause(500);}
     if(value.code==='result_unavailable')value={ok:true,status:value.status,draftId:id,pending:true,hint:'The local result is not ready. Use result later; do not send or prepare a duplicate.'};
   }
-  else if(command==='--help')value={commands:['configure [--token-file <file>]','install [--project <dir>] [--upgrade]','profile [export | set <id> "<text>" --quote "<sourceQuote>" | rm <id>]','prepare <packet.json>','review <draftId> [--no-open]','wait <draftId> [seconds:1-900]','result <draftId> [--defer-receipt]','receipt <draftId>','diagnose <draftId>','list','clean [--apply] [--all] [--days <N>]','followup <draftId> <answers.json>','send <draftId> <approvedHash> <confirmation.txt> (legacy explicit-confirmation interface)'],note:'Installation defaults to user scope under $HOME (no administrator access); pass --project <dir> for project scope. Preparation is local. Use review for the shared zesia.dev window. Only its approval sends materials.'};
+  else if(command==='--help')value={commands:['configure [--token-file <file>]','install [--project <dir>] [--upgrade]','profile [export | set <id> "<text>" --quote "<sourceQuote>" | rm <id>]','prepare <packet.json>','workspace [--group <packet.json>]','review <draftId> [--no-open]','wait <draftId> [seconds:1-900]','result <draftId> [--defer-receipt]','receipt <draftId>','diagnose <draftId>','list','clean [--apply] [--all] [--days <N>]','followup <draftId> <answers.json>','send <draftId> <approvedHash> <confirmation.txt> (legacy explicit-confirmation interface)'],note:'Installation defaults to user scope under $HOME (no administrator access); pass --project <dir> for project scope. Preparation is local. Use review for the shared zesia.dev window. Only its approval sends materials.'};
   else throw Error('Unknown command. Run with --help.');
   if(['prepare','followup'].includes(command)&&value){delete value.packet;value.hint='Materials are prepared locally. Open review, then wait for the result. Do not paste or send the packet from chat.';}
   if(value!==undefined&&!['serve-review','serve-online-review'].includes(command))console.log(JSON.stringify(value,null,2));

@@ -81,3 +81,7 @@ preparation, follow-up, or adoption review, save it in-place with the user's exa
 words via `<skill-directory>/scripts/zesia profile set <id> "<text>" --quote "<sourceQuote>"`
 and echo the change in one line of your reply. Never write `agent_inference` silently into
 Profile.
+
+## Local workspace and group review
+
+Use `zesia workspace` to open the local session list. For an explicitly requested group that needs a verifiable deliverable, prepare an ordinary Consult packet and open it with `zesia workspace --group <packet.json>` on a supported, configured room endpoint. The user reviews and approves the materials in the browser. Keep the local runtime available for verified result handback. For a request that one expert can answer directly, use the normal Consult workflow.

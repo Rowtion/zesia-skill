@@ -15,6 +15,7 @@ import {
   setProfileItem,
 } from './runtime/profile.mjs';
 import { runtimeVersion } from './runtime/standalone.mjs';
+import { createWorkspaceStore, defaultWorkspaceDir } from './runtime/workspace.mjs';
 
 export function portableEnvironment(env = process.env) {
   return { ...env, ZESIA_CONFIG: env.ZESIA_CONFIG || join(homedir(), '.config/zesia/agent.json') };
@@ -33,6 +34,7 @@ function check(packet) {
 const DEFAULT_STATE_DIR = () => process.env.ZESIA_STATE_DIR || join(homedir(), '.local/state/zesia/consult');
 export function createPortable({
   stateDir = DEFAULT_STATE_DIR(),
+  workspaceDir = stateDir === DEFAULT_STATE_DIR() ? defaultWorkspaceDir() : join(stateDir, '.workspace'),
   profilePath,
   configuration = () => readConfig(portableEnvironment(), { requireToken: false }),
   saveConfiguration = values => saveConfig(values, portableEnvironment()),
@@ -40,6 +42,22 @@ export function createPortable({
   consult = consultOverA2A, recover = recoverConsult, ack = ackConsult, now = Date.now,
 } = {}) {
   const previews = new Map();
+  const workspace = createWorkspaceStore(workspaceDir);
+  async function mirror(record) {
+    if (!record.packet) {
+      await workspace.remove('draft', record.id);
+      await workspace.remove('consult', record.id);
+      return;
+    }
+    if (record.status === 'onboarding') return;
+    const kind = record.status === 'prepared' ? 'draft' : 'consult';
+    const updatedAt = record.completedAt ?? record.approval?.at ?? record.createdAt ?? now();
+    await workspace.save({
+      id: record.id, kind, title: record.packet.project, status: record.status, updatedAt: new Date(updatedAt).toISOString(),
+      packet: record.packet, result: record.result ?? null,
+    });
+    if (kind === 'consult') await workspace.remove('draft', record.id);
+  }
   const resolvedProfilePath = profilePath || defaultProfilePath(process.env, stateDir !== DEFAULT_STATE_DIR() ? stateDir : null);
   const path = id => {
     if (!/^[0-9a-f-]{36}$/.test(id || '')) throw new Error('Invalid draft ID.');
@@ -56,6 +74,7 @@ export function createPortable({
     await mkdir(stateDir, { recursive: true, mode: 0o700 });
     const file = path(record.id), temp = file+'.'+randomUUID()+'.tmp';
     await writeFile(temp, JSON.stringify(record), { mode: 0o600 }); await rename(temp, file);
+    await mirror(record).catch(() => {});
   };
   async function receivedAt(id) {try{return JSON.parse(await readFile(path(id)+'.received','utf8')).at;}catch{return null;}}
   async function acceptResponse(record,response) {
@@ -313,6 +332,8 @@ export function createPortable({
           if (apply) {
             await unlink(path(item.draftId)).catch(err => { if (err.code !== 'ENOENT') throw err; });
             await unlink(path(item.draftId) + '.received').catch(err => { if (err.code !== 'ENOENT') throw err; });
+            await workspace.remove('draft', item.draftId);
+            await workspace.remove('consult', item.draftId);
           }
           deleted++;
         } else if (item.action === 'redact') {

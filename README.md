@@ -65,3 +65,9 @@ The plugin includes installation instructions and per-platform Runtime checksums
 The separately released Setup 1.1.0 installs the verified executable and its
 bundled A2A CLI in a versioned user directory. Installation, Skill discovery and
 the first consultation are separate checks. Existing Skill paths remain available.
+
+### Local workspace preview
+
+Run `zesia workspace` to open the local session list. The browser only sees it after connecting to the short-lived loopback bridge. For offline reading, choose the `.zesia` directory from the workspace in a supported browser.
+
+In Staging, configure the Consult Worker and run `zesia workspace --group packet.json` to open the local group confirmation. Keep the runtime running while it observes the approved room. It verifies each archived artifact's length and SHA-256, saves the result and audit locally, then signs the cloud handback acknowledgment. The caller signing key stays in the running runtime. Ending that process before synchronization can leave the room without a handback acknowledgment.
