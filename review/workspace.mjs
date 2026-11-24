@@ -152,5 +152,5 @@ export async function startWorkspaceReview({
   }, 3_000);
   const query = selectedDraft ? '?' + new URLSearchParams({ draft: selectedDraft }) : '';
   const fragment = new URLSearchParams({ workspace: '1', port: String(port), key: secret });
-  return { url: origin + '/consult' + query + '#' + fragment, close };
+  return { url: origin + '/consult' + query + '#' + fragment, groupId: selectedDraft || undefined, close };
 }
