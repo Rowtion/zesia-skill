@@ -63,7 +63,7 @@ try {
     }
     process.once('SIGINT',workspace.close);
     process.once('SIGTERM',workspace.close);
-    if(workspace.groupId)value={ok:true,status:'awaiting_confirmation',groupId:workspace.groupId};
+    if(workspace.groupId)value={ok:true,status:workspace.status,groupId:workspace.groupId};
   }
   else if(command==='workspace-result'){
     const seconds=hash===undefined?0:Number(hash);
@@ -71,7 +71,7 @@ try {
     const store=createWorkspaceStore(),deadline=Date.now()+seconds*1000;
     while(true){
       value=await workspaceGroupResult(store,id);
-      if(value.status==='completed'||Date.now()>=deadline)break;
+      if(['completed','blocked'].includes(value.status)||Date.now()>=deadline)break;
       await pause(500);
     }
   }

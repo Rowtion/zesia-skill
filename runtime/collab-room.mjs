@@ -90,7 +90,7 @@ async function boundedBytes(response, expected) {
   return Buffer.concat(chunks);
 }
 
-export function createGroupWorkflow({ store, configuration, fetchRequest = fetch, now = Date.now } = {}) {
+export function createGroupWorkflow({ store, configuration, fetchRequest = fetch, now = Date.now, trustedHost } = {}) {
   const active = new Map();
 
   async function send(group, path, options = {}) {
@@ -100,7 +100,9 @@ export function createGroupWorkflow({ store, configuration, fetchRequest = fetch
       ...options, headers: { authorization: 'Bearer ' + config.token, ...options.headers },
       redirect: 'error', signal: AbortSignal.timeout(15_000),
     });
-    if (!response.ok) throw Error('The cloud room did not confirm this operation.');
+    if (!response.ok && !(path === 'session' && [404, 410].includes(response.status))) {
+      throw Error('The cloud room did not confirm this operation.');
+    }
     return response;
   }
 
@@ -163,12 +165,58 @@ export function createGroupWorkflow({ store, configuration, fetchRequest = fetch
     return { url: groupUrl(group) };
   }
 
+  async function admitTrusted(roomId) {
+    const group = active.get(roomId);
+    if (!trustedHost || group?.status !== 'prepared' || group.origin !== trustedHost.origin) return undefined;
+    const admission = group.admission;
+    const scope = {
+      purpose: 'admission', subjectId: admission.draftId, requestId: admission.requestId,
+      scopeHash: admission.approvalHash, keyFingerprint: admission.identity.keyFingerprint,
+      destination: admission.destination, decision: 'approved', expiresAt: admission.expiresAt,
+    };
+    let proof;
+    try {
+      const response = await send(group, 'trusted-proof', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ host: trustedHost.host, scope,
+          signature: trustedHost.sign(digest(['zesia.room.trusted-consult.v1', roomId, scope])) }),
+      });
+      proof = (await response.json()).proof;
+    } catch { return undefined; }
+    try {
+      return await decision({ id: roomId, approvalHash: admission.approvalHash, approved: true, proof });
+    } catch {
+      // The request may have reached the cloud. Keep the original room and
+      // observe it, without making another submission or opening manual Send.
+      return group.status === 'confirming' ? { url: groupUrl(group), confirming: true } : undefined;
+    }
+  }
+
   async function archive(group) {
-    const session = await (await send(group, 'session')).json();
+    const response = await send(group, 'session');
+    const session = await response.json();
+    if (!response.ok) {
+      if (response.status === 410 && session.code === 'room_cloud_copy_cleaning') return;
+      if (response.status !== 404 || session.code !== 'room_cloud_copy_purged') {
+        throw Error('The cloud room did not confirm this operation.');
+      }
+      const saved = await store.read('group', group.roomId);
+      if (['completed', 'blocked'].includes(saved.status) && saved.result?.receiptId && saved.snapshot?.room?.roomId === group.roomId) {
+        await store.save({ ...saved, updatedAt: iso(now()), cloudCopy: { ...saved.cloudCopy, state: 'purged' } });
+        active.delete(group.roomId);
+      }
+      return;
+    }
     if (session.room?.roomId !== group.roomId || session.admissionBinding?.requestId !== group.admission.requestId
       || session.admissionBinding?.keyFingerprint !== group.admission.identity.keyFingerprint) throw Error('Unexpected cloud room identity.');
     group.status = 'active';
+    if (group.awaitingRetirement) return;
     if (!session.result?.receiptId || !id.test(session.result.receiptId)) return;
+    const diagnosis = session.result.diagnosis;
+    if (diagnosis && (session.room.lifecycle?.state !== 'blocked'
+      || !['objective_blocker', 'verification_incomplete'].includes(diagnosis.kind)
+      || !['checked', 'constraint', 'finding', 'nextStep'].every(key => typeof diagnosis[key] === 'string' && diagnosis[key].length <= 800)
+      || !Array.isArray(diagnosis.evidence) || !Array.isArray(diagnosis.checks))) throw Error('Invalid workspace diagnostic.');
     const refs = session.result.artifacts ?? [];
     if (!Array.isArray(refs) || refs.length > maxArtifacts) throw Error('Invalid cloud artifacts.');
     const artifacts = [];
@@ -193,7 +241,7 @@ export function createGroupWorkflow({ store, configuration, fetchRequest = fetch
     }
     const { csrf: _csrf, admissionBinding: _binding, ...snapshot } = session;
     const saved = {
-      id: group.roomId, kind: 'group', title: group.admission.goal.title, status: 'completed',
+      id: group.roomId, kind: 'group', title: group.admission.goal.title, status: diagnosis ? 'blocked' : 'completed',
       updatedAt: iso(now()), url: groupUrl(group), result: session.result, snapshot, events, artifacts, packet: group.packet,
     };
     await store.save(saved);
@@ -205,12 +253,16 @@ export function createGroupWorkflow({ store, configuration, fetchRequest = fetch
         body: JSON.stringify(value),
       })).json();
       await store.save({ ...saved, cloudCopy: { expiresAt: ack.expiresAt, acknowledgedAt: ack.acknowledgedAt } });
+      if (ack.acknowledgedAt && ack.expiresAt === ack.acknowledgedAt) {
+        group.awaitingRetirement = true;
+        return;
+      }
     }
     active.delete(group.roomId);
   }
 
   return {
-    stage, decision,
+    stage, decision, admitTrusted,
     list: () => Array.from(active.values(), group => ({
       id: group.roomId, kind: group.status === 'prepared' ? 'draft' : 'group', title: group.admission.goal.title,
       status: group.status, groupDraft: group.status === 'prepared', updatedAt: group.admission.expiresAt,
