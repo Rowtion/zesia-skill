@@ -1,0 +1,248 @@
+import { createHash, generateKeyPairSync, randomUUID, sign } from 'node:crypto';
+import { destinationOf } from './config.mjs';
+import { attachmentPayload } from './evidence.mjs';
+import { stripAttachments, validatePacket } from './workflow.mjs';
+
+const sha = bytes => createHash('sha256').update(bytes).digest('hex');
+const id = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
+const hash = /^[a-f0-9]{64}$/u;
+const stable = value => {
+  if (Array.isArray(value)) return value.map(stable);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])]));
+  }
+  return value;
+};
+const digest = value => sha(JSON.stringify(stable(value)));
+const iso = value => new Date(value).toISOString();
+const SIGN_OPTIONS = { dsaEncoding: 'ieee-p1363' };
+const maxArtifacts = 128;
+const maxOutputBytes = 2 * 1024 * 1024;
+
+// The room contract digests the exact canonical, validated packet. Keep
+// whitespace-sensitive quotes as entered and trim only fields trimmed by the contract.
+function groupPacket(source) {
+  const packet = structuredClone(source);
+  packet.context ??= {};
+  validatePacket(packet, packet.requester);
+  for (const key of ['requester', 'project', 'brief']) packet[key] = packet[key].trim();
+  for (const key of ['goal', 'originalReply']) {
+    if (packet.context[key]) packet.context[key] = packet.context[key].trim();
+  }
+  for (const key of ['facts', 'assumptions', 'userFeedback', 'constraints', 'previousAdvice']) {
+    if (packet.context[key]) packet.context[key] = packet.context[key].map(item => item.trim());
+  }
+  for (const [list, keys] of Object.entries({
+    attempts: ['action', 'outcome'], statements: ['id', 'text', 'sourceRef'],
+    materials: ['id', 'content'], attachments: ['id', 'filename', 'description', 'mediaType', 'data'],
+  })) {
+    for (const item of packet.context[list] ?? []) {
+      for (const key of keys) {
+        if (typeof item[key] === 'string') item[key] = item[key].trim();
+      }
+    }
+  }
+  if (!packet.requester || packet.requester.length > 120 || packet.context.continuation
+    || Buffer.byteLength(JSON.stringify(stripAttachments(packet))) > 128 * 1024) {
+    throw Error('Use a new, bounded Consult packet to create a group.');
+  }
+  return packet;
+}
+
+function prepareFiles(packet) {
+  const files = [
+    ...(packet.context.materials ?? []).map(item => ({
+      id: item.id, kind: 'inline_text', name: item.id, mediaType: 'text/plain',
+      bytes: Buffer.from(item.content), text: item.content,
+    })),
+    ...(packet.context.attachments ?? []).map(item => ({
+      id: item.id, kind: 'attachment', name: (item.filename || item.id).slice(0, 160), mediaType: item.mediaType,
+      bytes: Buffer.from(attachmentPayload(item).base64, 'base64'),
+    })),
+  ];
+  if (files.some(file => !id.test(file.id)) || new Set(files.map(file => file.id)).size !== files.length) {
+    throw Error('Group materials require unique artifact IDs.');
+  }
+  return files;
+}
+
+function filenameFor(response, ref) {
+  const encoded = /^attachment; filename\*=UTF-8''(.+)$/iu.exec(response.headers.get('content-disposition') ?? '')?.[1];
+  const name = encoded ? decodeURIComponent(encoded) : ref.filename || ref.artifactId;
+  return /[\/\\\u0000-\u001f\u007f]/u.test(name) || name === '.' || name === '..' ? ref.artifactId : name;
+}
+
+async function boundedBytes(response, expected) {
+  const reader = response.body.getReader();
+  const chunks = [];
+  let length = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > expected) throw Error('Cloud artifact exceeds its sealed length.');
+      chunks.push(value);
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  return Buffer.concat(chunks);
+}
+
+export function createGroupWorkflow({ store, configuration, fetchRequest = fetch, now = Date.now } = {}) {
+  const active = new Map();
+
+  async function send(group, path, options = {}) {
+    const config = await configuration();
+    if (destinationOf(config.url) !== group.origin || !config.token) throw Error('Restore the approved destination and account.');
+    const response = await fetchRequest(group.admission.destination.url.replace(/\/admission$/u, '/' + path), {
+      ...options, headers: { authorization: 'Bearer ' + config.token, ...options.headers },
+      redirect: 'error', signal: AbortSignal.timeout(15_000),
+    });
+    if (!response.ok) throw Error('The cloud room did not confirm this operation.');
+    return response;
+  }
+
+  async function stage(input) {
+    const packet = groupPacket(input);
+    const origin = destinationOf((await configuration()).url);
+    const requestId = 'zrq-' + now() + '-' + randomUUID();
+    const roomId = 'room_' + digest(['zesia-room-v1', requestId]).slice(0, 48);
+    const key = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+    const publicKey = key.publicKey.export({ type: 'spki', format: 'der' });
+    const files = prepareFiles(packet);
+    const admission = {
+      format: 'zesia.collab-room.admission.v1', stage: 'admission',
+      draftId: 'draft-' + randomUUID(), requestId, expiresAt: iso(now() + 15 * 60_000),
+      destination: { key: 'zesia', url: origin + '/v1/rooms/' + roomId + '/admission' },
+      goal: { title: packet.project, line: (packet.context.goal || packet.brief).slice(0, 240).trim() },
+      identity: { proposedParticipantId: 'local-agent', agentLabel: packet.requester, projectLabel: packet.project,
+        keyAlgorithm: 'ECDSA_P256_SHA256', publicKeySpki: publicKey.toString('base64url'), keyFingerprint: sha(publicKey) },
+      manifest: files.map(file => ({
+        materialId: file.id, name: file.name, kind: file.kind, mediaType: file.mediaType, bytes: file.bytes.length, sha256: sha(file.bytes),
+      })),
+      packetSha256: digest(packet), maxRounds: 3, maxMicros: 5_000_000,
+    };
+    admission.approvalHash = digest(admission);
+    const group = { roomId, packet, files, origin, admission, key: key.privateKey, status: 'prepared' };
+    await store.save({ id: roomId, kind: 'draft', groupDraft: true, title: admission.goal.title, packet, status: 'prepared',
+      updatedAt: iso(now()), expiresAt: admission.expiresAt });
+    active.set(roomId, group);
+    return roomId;
+  }
+
+  const groupUrl = group => group.origin + '/consult?room=' + group.roomId;
+  const signFor = (group, value) => sign('sha256', Buffer.from(digest(value)), { key: group.key, ...SIGN_OPTIONS }).toString('base64url');
+
+  async function decision({ id: roomId, approvalHash, approved, proof }) {
+    const group = active.get(roomId);
+    if (!group || group.admission.approvalHash !== approvalHash || Date.parse(group.admission.expiresAt) <= now()
+      || typeof approved !== 'boolean') throw Error('The exact group draft is no longer available.');
+    if (group.status !== 'prepared') throw Error('The decision has already been recorded.');
+    if (!approved) {
+      await store.remove('draft', roomId);
+      active.delete(roomId);
+      return { cancelled: true };
+    }
+    if (typeof proof !== 'string' || !/^[A-Za-z0-9_-]{40,8192}$/u.test(proof)) throw Error('A human approval proof is required.');
+    group.status = 'confirming';
+    await store.save({ id: roomId, kind: 'group', title: group.admission.goal.title,
+      status: 'confirming', updatedAt: iso(now()), url: groupUrl(group) });
+    await store.remove('draft', roomId);
+    const signature = signFor(group, ['zesia.room.caller-admission.v1', roomId, approvalHash]);
+    const response = await send(group, 'admission', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ admission: group.admission, packet: group.packet, signature, proof }),
+    });
+    const admitted = await response.json();
+    if (admitted.roomId !== roomId) throw Error('Unexpected cloud room identity.');
+    group.status = 'active';
+    await store.save({ id: roomId, kind: 'group', title: group.admission.goal.title,
+      status: 'active', updatedAt: iso(now()), url: groupUrl(group) });
+    return { url: groupUrl(group) };
+  }
+
+  async function archive(group) {
+    const session = await (await send(group, 'session')).json();
+    if (session.room?.roomId !== group.roomId || session.admissionBinding?.requestId !== group.admission.requestId
+      || session.admissionBinding?.keyFingerprint !== group.admission.identity.keyFingerprint) throw Error('Unexpected cloud room identity.');
+    group.status = 'active';
+    if (!session.result?.receiptId || !id.test(session.result.receiptId)) return;
+    const refs = session.result.artifacts ?? [];
+    if (!Array.isArray(refs) || refs.length > maxArtifacts) throw Error('Invalid cloud artifacts.');
+    const artifacts = [];
+    for (const ref of refs) {
+      if (!id.test(ref.artifactId) || !ref.objectVersion || !hash.test(ref.sha256)
+        || !Number.isSafeInteger(ref.bytes) || ref.bytes < 0 || ref.bytes > maxOutputBytes) throw Error('Invalid cloud artifact reference.');
+      const url = 'artifact?' + new URLSearchParams({ id: ref.artifactId, version: ref.objectVersion });
+      const response = await send(group, url);
+      const bytes = await boundedBytes(response, ref.bytes);
+      await store.saveArtifact(group.roomId, ref, bytes);
+      artifacts.push({ ...ref, filename: filenameFor(response, ref) });
+    }
+    const events = [];
+    let since = 0;
+    for (;;) {
+      const page = await (await send(group, 'events?' + new URLSearchParams({ since, limit: 100 }))).json();
+      if (!Array.isArray(page.events)) throw Error('Invalid cloud audit page.');
+      events.push(...page.events);
+      if (!page.hasMore) break;
+      if (!Number.isSafeInteger(page.nextSince) || page.nextSince <= since || events.length > 3000) throw Error('Cloud audit did not advance.');
+      since = page.nextSince;
+    }
+    const { csrf: _csrf, admissionBinding: _binding, ...snapshot } = session;
+    const saved = {
+      id: group.roomId, kind: 'group', title: group.admission.goal.title, status: 'completed',
+      updatedAt: iso(now()), url: groupUrl(group), result: session.result, snapshot, events, artifacts, packet: group.packet,
+    };
+    await store.save(saved);
+    if (session.cloudCopy) {
+      const value = { receiptId: session.result.receiptId };
+      const signature = signFor(group, ['zesia.room.caller-command.v1', group.roomId, 'handback', value]);
+      const ack = await (await send(group, 'handback', {
+        method: 'POST', headers: { 'content-type': 'application/json', 'x-zesia-room-signature': signature },
+        body: JSON.stringify(value),
+      })).json();
+      await store.save({ ...saved, cloudCopy: { expiresAt: ack.expiresAt, acknowledgedAt: ack.acknowledgedAt } });
+    }
+    active.delete(group.roomId);
+  }
+
+  return {
+    stage, decision,
+    list: () => Array.from(active.values(), group => ({
+      id: group.roomId, kind: group.status === 'prepared' ? 'draft' : 'group', title: group.admission.goal.title,
+      status: group.status, groupDraft: group.status === 'prepared', updatedAt: group.admission.expiresAt,
+      ...(group.status === 'active' && { url: groupUrl(group) }),
+    })),
+    preview(roomId) {
+      const group = active.get(roomId);
+      if (!group || group.status !== 'prepared') return null;
+      return {
+        stage: 'admission', admission: group.admission,
+        materials: group.files.map(file => ({
+          id: file.id, name: file.name, ...(file.text !== undefined ? { text: file.text } : { downloadable: true }),
+        })),
+      };
+    },
+    attachment(roomId, artifactId) {
+      const group = active.get(roomId);
+      const file = group?.status === 'prepared' && group.files.find(item => item.id === artifactId && item.kind === 'attachment');
+      if (!file) throw Error('The draft attachment is unavailable.');
+      return { ...file, filename: file.name };
+    },
+    async sync() {
+      for (const group of active.values()) {
+        if (!['active', 'confirming'].includes(group.status) || group.syncing) continue;
+        group.syncing = true;
+        try { await archive(group); }
+        catch {
+          // Unknown admission or handback retains the original scope. Only poll.
+          if (Date.parse(group.admission.expiresAt) + 26 * 3_600_000 <= now()) active.delete(group.roomId);
+        }
+        finally { group.syncing = false; }
+      }
+    },
+  };
+}
