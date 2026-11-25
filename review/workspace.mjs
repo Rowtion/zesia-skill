@@ -25,7 +25,7 @@ async function jsonBody(request) {
 }
 
 export async function startWorkspaceReview({
-  runtime, origin = 'https://zesia.dev', store = createWorkspaceStore(), configuration, groupPacket,
+  runtime, origin = 'https://zesia.dev', store = createWorkspaceStore(), configuration, groupPacket, workspaceMode,
   group, identify = trustedHostIdentity, idleMs = 15 * 60_000,
 } = {}) {
   if (!workspaceOrigins.has(origin)) throw Error('The workspace origin is not supported.');
@@ -35,7 +35,7 @@ export async function startWorkspaceReview({
   const configured = await configuration?.().catch(() => undefined);
   const trustedHost = configured?.url === origin ? await identify(origin).catch(() => undefined) : undefined;
   group ??= createGroupWorkflow({ store, configuration, trustedHost });
-  const selectedDraft = groupPacket ? await group.stage(groupPacket) : '';
+  const selectedDraft = groupPacket ? await group.stage(groupPacket, { workspaceMode }) : '';
   const trustedAdmission = selectedDraft ? await group.admitTrusted?.(selectedDraft) : undefined;
   const secret = randomBytes(32).toString('base64url');
   const expected = Buffer.from('Bearer ' + secret);
