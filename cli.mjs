@@ -101,7 +101,7 @@ try {
     const store=createWorkspaceStore(),deadline=Date.now()+seconds*1000;
     while(true){
       value=await workspaceGroupResult(store,id);
-      if(['completed','blocked'].includes(value.status)||Date.now()>=deadline)break;
+      if(['completed','blocked','expired'].includes(value.status)||Date.now()>=deadline)break;
       await pause(500);
     }
   }

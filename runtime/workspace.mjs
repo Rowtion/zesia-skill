@@ -10,6 +10,13 @@ const kinds = new Set(['draft', 'consult', 'group']);
 const id = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 const sha = /^[a-f0-9]{64}$/u;
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+const DRIVER_RECOVERY_MS = 48 * 60 * 60_000;
+const roomIdPattern = /^room_[a-f0-9]{48}$/u;
+
+function driverRecoveryExpiry(record) {
+  const issued = Number(/^zrq-(\d+)-/u.exec(record?.requestId ?? '')?.[1]);
+  return Number.isSafeInteger(issued) && issued >= 0 ? issued + DRIVER_RECOVERY_MS : 0;
+}
 
 async function directory(path, create = false) {
   if (create) {
@@ -23,11 +30,12 @@ async function directory(path, create = false) {
   return path;
 }
 
-async function readBounded(path, max) {
+async function readBounded(path, max, privateFile = false) {
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = await handle.stat();
     if (!stat.isFile() || stat.nlink !== 1 || stat.size > max) throw Error('Workspace file is unsafe.');
+    if (privateFile && process.platform !== 'win32' && (stat.mode & 0o077)) throw Error('Driver recovery file permissions are unsafe.');
     const bytes = Buffer.alloc(stat.size + 1);
     const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
     if (bytesRead !== stat.size) throw Error('Workspace file changed during read.');
@@ -86,7 +94,9 @@ async function deliveryOutput(folder, output, create = false) {
 }
 
 function requireOutputBytes(output, bytes) {
-  if (bytes.length !== output.bytes || digest(bytes) !== output.sha256) throw Error('Delivery artifact failed verification.');
+  const sha256 = digest(bytes);
+  if (bytes.length !== output.bytes || sha256 !== output.sha256) throw Error('Delivery artifact failed verification.');
+  return { path: output.path, sha256, bytes: bytes.length };
 }
 
 export function createWorkspaceStore(root = defaultWorkspaceDir()) {
@@ -116,6 +126,10 @@ export function createWorkspaceStore(root = defaultWorkspaceDir()) {
     const parent = await directory(join(await base(create), 'driver-recovery'), create);
     return join(parent, checkedId(roomId) + '.json');
   }
+  async function removeDriverRecovery(roomId) {
+    try { await unlink(await recoveryPath(roomId)); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
   async function readDriverDelivery(roomId, deliveryId) {
     const folder = await directory(join(await deliveries(roomId), checkedId(deliveryId)));
     const sealed = JSON.parse(await readBounded(join(folder, 'receipt.json'), 128 * 1024));
@@ -125,12 +139,13 @@ export function createWorkspaceStore(root = defaultWorkspaceDir()) {
       throw Error('Invalid local delivery receipt.');
     }
     const artifacts = [];
+    const measuredOutputs = [];
     for (const output of sealed.manifest.outputs) {
       const path = await deliveryOutput(folder, output);
-      requireOutputBytes(output, await readBounded(path, output.bytes));
+      measuredOutputs.push(requireOutputBytes(output, await readBounded(path, output.bytes)));
       artifacts.push({ ...output, path });
     }
-    return { folder, sealed, artifacts };
+    return { folder, sealed, artifacts, measuredOutputs };
   }
   return {
     async save(value) {
@@ -146,12 +161,36 @@ export function createWorkspaceStore(root = defaultWorkspaceDir()) {
     async saveDriverRecovery(roomId, state) {
       await writeAtomic(await recoveryPath(roomId, true), JSON.stringify(state));
     },
-    async readDriverRecovery(roomId) {
-      return JSON.parse(await readBounded(await recoveryPath(roomId), 8 * 1024));
+    async readDriverRecovery(roomId, now = Date.now()) {
+      const record = JSON.parse(await readBounded(await recoveryPath(roomId), 8 * 1024, true));
+      if (driverRecoveryExpiry(record) <= now) {
+        await removeDriverRecovery(roomId);
+        throw Error('The local driver recovery key expired.');
+      }
+      return record;
     },
-    async removeDriverRecovery(roomId) {
-      try { await unlink(await recoveryPath(roomId)); }
-      catch (error) { if (error.code !== 'ENOENT') throw error; }
+    removeDriverRecovery,
+    async cleanDriverRecovery({ all = false, apply = false, now = Date.now() } = {}) {
+      let parent, entries;
+      try {
+        parent = await directory(join(await base(), 'driver-recovery'));
+        entries = await readdir(parent, { withFileTypes: true });
+      } catch (error) {
+        if (error.code === 'ENOENT') return [];
+        throw error;
+      }
+      const removed = [];
+      for (const entry of entries) {
+        const roomId = entry.name.slice(0, -5);
+        if (!entry.isFile() || !entry.name.endsWith('.json') || !roomIdPattern.test(roomId)) continue;
+        if (!all) {
+          const record = await readBounded(join(parent, entry.name), 8 * 1024, true).then(JSON.parse).catch(() => null);
+          if (driverRecoveryExpiry(record) > now) continue;
+        }
+        if (apply) await removeDriverRecovery(roomId);
+        removed.push(roomId);
+      }
+      return removed;
     },
     async saveDriverDelivery(roomId, sealed, download) {
       const deliveryId = checkedId(sealed.manifest.deliveryId);
@@ -249,6 +288,11 @@ export async function workspaceGroupResult(store, roomId) {
   if (value?.status === 'blocked' && value.result?.receiptId && value.result?.diagnosis) {
     return { ok: true, roomId, status: 'blocked', receiptId: value.result.receiptId,
       diagnosis: value.result.diagnosis, retryAllowed: false };
+  }
+  if (value?.status === 'expired' && value.driverDeliveryId) {
+    const { artifacts } = await store.readDriverDelivery(roomId, value.driverDeliveryId);
+    return { ok: true, roomId, status: 'expired', receiptId: value.driverDeliveryId,
+      cloudPurgedAt: value.cloudCopy.cloudPurgedAt, artifacts, retryAllowed: false };
   }
   if (value?.status !== 'completed' || !value.result?.receiptId) {
     return { ok: true, roomId, status: 'pending', retryAllowed: false };

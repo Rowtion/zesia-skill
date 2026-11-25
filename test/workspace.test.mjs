@@ -4,6 +4,7 @@ import { createHash, createPublicKey, randomBytes, verify } from 'node:crypto';
 import { mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { createPortable } from '../runtime.mjs';
 import { createWorkspaceStore, workspaceGroupResult } from '../runtime/workspace.mjs';
 import { createGroupWorkflow } from '../runtime/collab-room.mjs';
 import { startWorkspaceReview } from '../review/workspace.mjs';
@@ -114,6 +115,9 @@ test('the BYO driver signs a fixed operation for the approved room and never rep
   let signer;
   let admission;
   let approved = false;
+  let markAdmission, finishAdmission;
+  const entered = new Promise(resolve => { markAdmission = resolve; });
+  const admissionResponse = new Promise(resolve => { finishAdmission = resolve; });
   const group = createGroupWorkflow({ store, configuration, async fetchRequest(url, options) {
     const target = new URL(url);
     assert.equal(target.origin, origin);
@@ -127,7 +131,9 @@ test('the BYO driver signs a fixed operation for the approved room and never rep
       assert.equal(value.admission.workspaceMode, 'byo_agent');
       admission = value.admission;
       signer = createPublicKey({ key: Buffer.from(value.admission.identity.publicKeySpki, 'base64url'), type: 'spki', format: 'der' });
-      return Response.json({ roomId }, { status: 202 });
+      markAdmission();
+      await admissionResponse;
+      throw Error('Synthetic loss after the admission was sent.');
     }
     writes.push({ path, id: value.commandId });
     const body = { commandId: value.commandId, protocol: value.protocol, scopeHash: value.scopeHash };
@@ -144,8 +150,17 @@ test('the BYO driver signs a fixed operation for the approved room and never rep
   await assert.rejects(group.driverOperation(roomId, 'join', data), /approve/u);
   assert.deepEqual(writes, []);
   const { admission: preview } = group.preview(roomId);
-  await group.decision({ id: roomId, approved: true, approvalHash: preview.approvalHash, proof: randomBytes(40).toString('base64url') });
+  await assert.rejects(store.readDriverRecovery(roomId), { code: 'ENOENT' });
+  const admissionAttempt = group.decision({ id: roomId, approved: true, approvalHash: preview.approvalHash,
+    proof: randomBytes(40).toString('base64url') });
+  await entered;
+  await assert.rejects(store.readDriverRecovery(roomId), { code: 'ENOENT' });
+  finishAdmission();
+  await assert.rejects(admissionAttempt, /disconnected|loss after the admission|confirmed/u);
+  await assert.rejects(store.readDriverRecovery(roomId), { code: 'ENOENT' });
+  await group.sync();
   assert.equal((await group.driverOperation(roomId, 'join', { commandId: data.commandId })).code, 'room_workspace_approval_required');
+  assert.equal((await store.readDriverRecovery(roomId)).requestId, admission.requestId);
   approved = true;
   assert.equal((await group.driverOperation(roomId, 'join', { commandId: data.commandId })).scopeHash, scopeHash);
   await assert.rejects(group.driverOperation(roomId, 'tools/list_changed', data), /supported driver operation/u);
@@ -158,7 +173,29 @@ test('the BYO driver signs a fixed operation for the approved room and never rep
     { path: 'driver/consult', id: 'consult-test' }]);
 });
 
-test('BYO handback validates bytes, survives a lost ACK, and publishes a deterministic proof', async t => {
+test('clean expires private BYO recovery state while retaining the local group', async t => {
+  const { directory, store } = await workspace(t);
+  const now = Date.now();
+  const roomId = character => 'room_' + character.repeat(48);
+  const recovery = time => ({ requestId: 'zrq-' + time + '-' + 'a'.repeat(40) });
+  await store.save({ id: roomId('a'), kind: 'group', status: 'active', updatedAt: new Date(now).toISOString() });
+  await store.saveDriverRecovery(roomId('a'), recovery(now - 49 * 60 * 60 * 1000));
+  await store.saveDriverRecovery(roomId('b'), recovery(now));
+  await store.saveDriverRecovery(roomId('c'), recovery(now - 49 * 60 * 60 * 1000));
+  await assert.rejects(store.readDriverRecovery(roomId('c'), now), /expired/u);
+  await assert.rejects(store.readDriverRecovery(roomId('c'), now), { code: 'ENOENT' });
+  const runtime = createPortable({ workspaceDir: directory, stateDir: join(directory, 'consult'), now: () => now });
+  assert.deepEqual((await runtime.clean()).driverRecovery, [roomId('a')]);
+  assert.equal((await store.readDriverRecovery(roomId('a'), now - 2 * 60 * 60 * 1000)).requestId, recovery(now - 49 * 60 * 60 * 1000).requestId);
+  assert.deepEqual((await runtime.clean({ apply: true })).driverRecovery, [roomId('a')]);
+  assert.equal((await store.read('group', roomId('a'))).status, 'active');
+  assert.deepEqual((await runtime.clean({ all: true, apply: true })).driverRecovery, [roomId('b')]);
+  await assert.rejects(store.readDriverRecovery(roomId('b'), now), { code: 'ENOENT' });
+});
+
+for (const expired of [false, true]) test(expired
+  ? 'BYO handback retains local files when the cloud expires before ACK'
+  : 'BYO handback validates bytes, survives a lost ACK, and publishes a deterministic proof', async t => {
   const { directory, store } = await workspace(t);
   const scopeHash = 'a'.repeat(64);
   const text = Buffer.from('{"rows":3}');
@@ -169,7 +206,9 @@ test('BYO handback validates bytes, survives a lost ACK, and publishes a determi
   const acknowledgedAt = '2026-11-25T00:00:00.000Z';
   let signer, sealed, roomId;
   let corrupt = true;
+  let duplicate = true;
   let acknowledged = false;
+  let retired = false;
   let sends = 0;
   let downloads = 0;
   async function fetchRequest(url, options) {
@@ -192,7 +231,17 @@ test('BYO handback validates bytes, survives a lost ACK, and publishes a determi
     assert.equal(path, 'driver/submit_verify');
     assert.equal(verify('sha256', Buffer.from(digest(['zesia.room.caller-command.v1', roomId, path, value])),
       { key: signer, dsaEncoding: 'ieee-p1363' }, Buffer.from(options.headers['x-zesia-room-signature'], 'base64url')), true);
-    if (['submit', 'status'].includes(value.kind)) return Response.json({ ok: true, state: 'passed', delivery: sealed });
+    if (['submit', 'status'].includes(value.kind)) {
+      const manifest = duplicate
+        ? { ...sealed.manifest, outputs: [output, { ...output, path: 'output/second.json' }] }
+        : sealed.manifest;
+      const manifestSha256 = digest(manifest);
+      const localReceiptSha256 = digest({
+        format: 'zesia.driver.local-receipt.v1', deliveryId, manifestSha256,
+        outputs: manifest.outputs.map(({ path, sha256, bytes }) => ({ path, sha256, bytes })),
+      });
+      return Response.json({ ok: true, state: 'passed', delivery: { manifest, manifestSha256, localReceiptSha256 } });
+    }
     if (value.kind === 'download') {
       downloads++;
       return Response.json({ ok: true, artifact: output, base64: (corrupt ? Buffer.alloc(text.length) : text).toString('base64') });
@@ -204,10 +253,11 @@ test('BYO handback validates bytes, survives a lost ACK, and publishes a determi
       manifestSha256: sealed.manifestSha256, localReceiptSha256: sealed.localReceiptSha256 };
     if (value.kind === 'ack') {
       sends++;
-      acknowledged = true;
-      throw Error('Synthetic loss after the ACK was committed.');
+      acknowledged = !expired;
+      throw Error('Synthetic loss during ACK.');
     }
     assert.equal(value.kind, 'retirement');
+    if (retired) return Response.json({ ...receipt, state: 'expired', cloudPurgedAt });
     return Response.json(acknowledged ? { ...receipt, state: 'purged', acknowledgedAt, cloudPurgedAt }
       : { ...receipt, state: 'awaiting_ack' });
   }
@@ -216,6 +266,9 @@ test('BYO handback validates bytes, survives a lost ACK, and publishes a determi
   const { admission } = group.preview(roomId);
   await group.decision({ id: roomId, approved: true, approvalHash: admission.approvalHash, proof: randomBytes(40).toString('base64url') });
   const body = { scopeHash, kind: 'submit', commandId: 'submit-runbook', runbook: { version: 1 } };
+  await assert.rejects(group.driverOperation(roomId, 'submit_verify', body), /delivery manifest failed verification/u);
+  assert.equal(downloads, 0);
+  duplicate = false;
   await assert.rejects(group.driverOperation(roomId, 'submit_verify', body), /failed verification/u);
   assert.equal(sends, 0);
   await assert.rejects(store.readDriverDelivery(roomId, deliveryId), { code: 'ENOENT' });
@@ -227,10 +280,21 @@ test('BYO handback validates bytes, survives a lost ACK, and publishes a determi
   const restarted = createGroupWorkflow({ store, configuration, fetchRequest });
   await restarted.resumeDriver(roomId);
   const finish = () => restarted.driverOperation(roomId, 'submit_verify', { kind: 'handback', commandId: 'resume-room', deliveryId });
+  retired = expired;
   const completed = await finish();
-  assert.equal(completed.state, 'completed');
+  assert.equal(completed.state, expired ? 'expired' : 'completed');
   const final = await workspaceGroupResult(store, roomId);
   assert.equal(final.cloudPurgedAt, cloudPurgedAt);
+  assert.equal(final.artifacts[0].path.startsWith(directory + '/'), true);
+  assert.deepEqual(await readFile(final.artifacts[0].path), text);
+  assert.equal(sends, 1);
+  assert.equal(downloads, 2);
+  await assert.rejects(store.readDriverRecovery(roomId), { code: 'ENOENT' });
+  if (expired) {
+    assert.equal(final.status, 'expired');
+    assert.equal(final.attestationPath, undefined);
+    return;
+  }
   const proof = await readFile(final.attestationPath);
   const attestation = JSON.parse(proof);
   assert.equal(attestation._type, 'https://in-toto.io/Statement/v1');
@@ -238,12 +302,10 @@ test('BYO handback validates bytes, survives a lost ACK, and publishes a determi
   assert.equal(attestation.predicate.localReceiptSha256, sealed.localReceiptSha256);
   assert.equal(attestation.predicate.cloudPurgedAt, cloudPurgedAt);
   assert.match(await readFile(final.summaryPath, 'utf8'), /Cloud cleanup confirmed/u);
-  assert.equal(final.artifacts[0].path.startsWith(directory + '/'), true);
   assert.deepEqual(await finish(), completed);
   assert.deepEqual(await readFile(final.attestationPath), proof);
   assert.equal(sends, 1);
   assert.equal(downloads, 2);
-  await assert.rejects(store.readDriverRecovery(roomId), { code: 'ENOENT' });
 });
 
 test('Workspace bridge scopes reads to loopback origin and capability', async t => {

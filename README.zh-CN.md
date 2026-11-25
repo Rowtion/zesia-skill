@@ -48,5 +48,7 @@ Mac 可执行文件在构建时签名。独立包保留校验和、来源版本�
 
 运行 `zesia workspace --driver packet.json`，由用户在浏览器确认材料及执行范围。每行向标准输入发送一个 JSON 请求。用 `join` 获取会话，写入时给 `exec` 带上当前 `epoch` 和 `checkpoint`。用 `consult` 提交问题及已批准的产物引用，用 `sync` 按原操作 ID 恢复结果。
 
-向 `submit_verify` 发送 `kind: "submit"`、当前 checkpoint 和 runbook。用 `kind: "status"` 加原 `submissionId` 查看核验。核验通过后，Runtime 会校验并原子保存产物，再确认云端清理。用 `zesia workspace-result <groupId>` 读取本机产物、`attestation.json` 和 `SUMMARY.md` 的路径。进程中断后，可运行 `zesia workspace --driver-resume <groupId>`，然后用 `submit_verify` 的 `kind: "handback"` 加原 `deliveryId` 恢复。
+向 `submit_verify` 发送 `kind: "submit"`、当前 checkpoint 和 runbook。用 `kind: "status"` 加原 `submissionId` 查看核验。核验通过后，Runtime 会校验并原子保存产物，重新读取本机产物的字节后签署确认，再查询云端清理结果。用 `zesia workspace-result <groupId>` 读取本机产物、`attestation.json` 和 `SUMMARY.md` 的路径。进程中断后，可运行 `zesia workspace --driver-resume <groupId>`，然后用 `submit_verify` 的 `kind: "handback"` 加原 `deliveryId` 恢复。若云端恢复窗口在收到确认前到期，`zesia workspace-result` 会显示到期状态并保留已保存的本机结果。
+
+云端确认准入后，Runtime 才将敏感的房间签名密钥写入仅用户可读写的恢复文件（POSIX 权限 `0600`）。交付完成后移除密钥，恢复时也会移除超过 48 小时的密钥。`zesia clean` 预览到期密钥，`zesia clean --apply` 清理到期密钥，`zesia clean --all --apply` 清理所有 Driver 恢复密钥。已保存的产物仍可读取。
 网站脚本是能够读取页面内存的受信代码，本地草稿要求不代表密码学上的服务端不可读取保证。
