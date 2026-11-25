@@ -14,6 +14,9 @@ const packet = { requester: 'Local Agent', project: 'Inventory audit', brief: 'R
   materials: [{ id: 'counts', content: 'Synthetic fixture' }],
 } };
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
+const stable = value => Array.isArray(value) ? value.map(stable)
+  : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])])) : value;
+const digest = value => sha(JSON.stringify(stable(value)));
 
 async function workspace(t) {
   const directory = await mkdtemp(join(tmpdir(), 'workspace-test-'));
@@ -153,6 +156,94 @@ test('the BYO driver signs a fixed operation for the approved room and never rep
   assert.equal(refused.code, 'request_budget_exceeded');
   assert.deepEqual(writes, [{ path: 'driver/join', id: 'join-test' }, { path: 'driver/exec', id: 'write-test' },
     { path: 'driver/consult', id: 'consult-test' }]);
+});
+
+test('BYO handback validates bytes, survives a lost ACK, and publishes a deterministic proof', async t => {
+  const { directory, store } = await workspace(t);
+  const scopeHash = 'a'.repeat(64);
+  const text = Buffer.from('{"rows":3}');
+  const output = { artifactId: 'summary_json', path: 'output/summary.json', objectVersion: 'verified-version',
+    sha256: sha(text), bytes: text.length, mediaType: 'application/json' };
+  const deliveryId = 'delivery_fixture';
+  const cloudPurgedAt = '2026-11-25T00:00:01.000Z';
+  const acknowledgedAt = '2026-11-25T00:00:00.000Z';
+  let signer, sealed, roomId;
+  let corrupt = true;
+  let acknowledged = false;
+  let sends = 0;
+  let downloads = 0;
+  async function fetchRequest(url, options) {
+    const [, id, path] = /\/rooms\/([^/]+)\/(.+)$/u.exec(new URL(url).pathname);
+    const value = JSON.parse(options.body);
+    if (path === 'admission') {
+      const { requestId, identity } = value.admission;
+      signer = createPublicKey({ key: Buffer.from(identity.publicKeySpki, 'base64url'), type: 'spki', format: 'der' });
+      const manifest = { format: 'zesia.driver.delivery.v1', roomId: id, requestId, scopeHash, submissionId: 'submit-runbook',
+        deliveryId, outputs: [output], proof: { inputs: [{ kind: 'material', path: 'input/orders', sha256: 'b'.repeat(64) }],
+          cmd: [['python3', 'input/main.py']], image: 'sha256:' + 'c'.repeat(64),
+          assertions: [{ assertionId: 'rows', passed: true }], semanticReview: { inputDigest: 'd'.repeat(64), verdictSha256: 'e'.repeat(64) } } };
+      const manifestSha256 = digest(manifest);
+      sealed = { manifest, manifestSha256, localReceiptSha256: digest({
+        format: 'zesia.driver.local-receipt.v1', deliveryId, manifestSha256,
+        outputs: [{ path: output.path, sha256: output.sha256, bytes: output.bytes }],
+      }) };
+      return Response.json({ roomId: id }, { status: 202 });
+    }
+    assert.equal(path, 'driver/submit_verify');
+    assert.equal(verify('sha256', Buffer.from(digest(['zesia.room.caller-command.v1', roomId, path, value])),
+      { key: signer, dsaEncoding: 'ieee-p1363' }, Buffer.from(options.headers['x-zesia-room-signature'], 'base64url')), true);
+    if (['submit', 'status'].includes(value.kind)) return Response.json({ ok: true, state: 'passed', delivery: sealed });
+    if (value.kind === 'download') {
+      downloads++;
+      return Response.json({ ok: true, artifact: output, base64: (corrupt ? Buffer.alloc(text.length) : text).toString('base64') });
+    }
+    assert.equal(value.localReceiptSha256, sealed.localReceiptSha256);
+    const { artifacts } = await store.readDriverDelivery(roomId, deliveryId);
+    assert.deepEqual(await readFile(artifacts[0].path), text);
+    const receipt = { ok: true, deliveryId, scopeHash, requestId: sealed.manifest.requestId,
+      manifestSha256: sealed.manifestSha256, localReceiptSha256: sealed.localReceiptSha256 };
+    if (value.kind === 'ack') {
+      sends++;
+      acknowledged = true;
+      throw Error('Synthetic loss after the ACK was committed.');
+    }
+    assert.equal(value.kind, 'retirement');
+    return Response.json(acknowledged ? { ...receipt, state: 'purged', acknowledgedAt, cloudPurgedAt }
+      : { ...receipt, state: 'awaiting_ack' });
+  }
+  const group = createGroupWorkflow({ store, configuration, fetchRequest });
+  roomId = await group.stage(packet, { workspaceMode: 'byo_agent' });
+  const { admission } = group.preview(roomId);
+  await group.decision({ id: roomId, approved: true, approvalHash: admission.approvalHash, proof: randomBytes(40).toString('base64url') });
+  const body = { scopeHash, kind: 'submit', commandId: 'submit-runbook', runbook: { version: 1 } };
+  await assert.rejects(group.driverOperation(roomId, 'submit_verify', body), /failed verification/u);
+  assert.equal(sends, 0);
+  await assert.rejects(store.readDriverDelivery(roomId, deliveryId), { code: 'ENOENT' });
+  corrupt = false;
+  const pending = await group.driverOperation(roomId, 'submit_verify', {
+    scopeHash, kind: 'status', submissionId: body.commandId, commandId: 'status-runbook',
+  });
+  assert.equal(pending.state, 'handback_pending');
+  const restarted = createGroupWorkflow({ store, configuration, fetchRequest });
+  await restarted.resumeDriver(roomId);
+  const finish = () => restarted.driverOperation(roomId, 'submit_verify', { kind: 'handback', commandId: 'resume-room', deliveryId });
+  const completed = await finish();
+  assert.equal(completed.state, 'completed');
+  const final = await workspaceGroupResult(store, roomId);
+  assert.equal(final.cloudPurgedAt, cloudPurgedAt);
+  const proof = await readFile(final.attestationPath);
+  const attestation = JSON.parse(proof);
+  assert.equal(attestation._type, 'https://in-toto.io/Statement/v1');
+  assert.deepEqual(attestation.subject, [{ name: 'output/summary.json', digest: { sha256: output.sha256 } }]);
+  assert.equal(attestation.predicate.localReceiptSha256, sealed.localReceiptSha256);
+  assert.equal(attestation.predicate.cloudPurgedAt, cloudPurgedAt);
+  assert.match(await readFile(final.summaryPath, 'utf8'), /Cloud cleanup confirmed/u);
+  assert.equal(final.artifacts[0].path.startsWith(directory + '/'), true);
+  assert.deepEqual(await finish(), completed);
+  assert.deepEqual(await readFile(final.attestationPath), proof);
+  assert.equal(sends, 1);
+  assert.equal(downloads, 2);
+  await assert.rejects(store.readDriverRecovery(roomId), { code: 'ENOENT' });
 });
 
 test('Workspace bridge scopes reads to loopback origin and capability', async t => {

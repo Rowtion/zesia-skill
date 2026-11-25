@@ -74,4 +74,18 @@ In Staging, configure the Consult Worker and run `zesia workspace --group packet
 
 The launcher reports a stable group ID. The originating agent can use `zesia workspace-result <groupId> [seconds]` to retrieve the saved receipt and verified artifact paths without contacting the cloud.
 
-`zesia workspace --driver packet.json` starts an interactive driver session against a Worker with Driver mode enabled. Keep its standard input open. After the human approves the materials and Workspace plan in the browser, the local agent can send one JSON object per line using `join`, `sync`, or `exec`. For example, send `{"operation":"join","commandId":"join-1"}`. The client discovers the approved scope and signs each operation with the key held in this process. Use stable command IDs and query an interrupted write with `sync` and its operation ID. The shared transport also reserves the fixed names `consult` and `submit_verify` for the platform review flow.
+`zesia workspace --driver packet.json` starts an interactive driver against a Worker with Driver mode enabled. Keep standard input open. After the human approves the exact materials and Workspace plan in the browser, send one JSON object per line.
+
+| Operation | Parameters after `operation` and a stable `commandId` |
+| --- | --- |
+| `join` | The runtime looks up the approved scope. Use the returned session and artifact references for later calls. |
+| `sync` | Supply `operationId` to recover a write or advisory reply. Capability pauses include the approval state and Workspace URL. |
+| `exec` | Supply `epoch`, `checkpoint`, and the approved `action`. Use the next checkpoint from the receipt. |
+| `consult` | Supply `question` and `artifacts` containing exact approved input or guide references. A repeat with the same command ID recovers the original advisory result. |
+| `submit_verify` | Use `kind: "submit"` with the current `epoch`, `checkpoint`, and `runbook`. Use `kind: "status"` with the original `submissionId` to check replay. |
+
+The runbook has `version: 1` and the fields `image`, `inputs`, `cmd`, `outputs`, and `assertions`. Use the approved `sha256:<image-digest>`. Each material input binds its artifact ID, version and digest to an `input/` path. For a script generated in the sandbox, declare `kind: "workspace"`, its `sourcePath` under `work/`, the target `input/` path and its SHA-256. Commands are argv arrays such as `["python3","input/reconcile.py"]`. Outputs carry the approved artifact ID, path and SHA-256. Supported assertions are `file`, `bytes`, `sha256` and `json_equals`.
+
+For a capability in an approved sandbox, send JSON on standard input to `zesia-capability`. The internal endpoint accepts registered call IDs and arguments. If a call returns `awaiting_approval`, let the user review it in Workspace, then use the same call ID and parameters. Use `sync` to observe an unknown call.
+
+When verification passes, the runtime checks the files against the sealed manifest, saves them atomically and signs the local receipt. Confirmed cloud cleanup produces `attestation.json` and `SUMMARY.md` under the local Workspace. The original agent can retrieve their paths with `zesia workspace-result <groupId>`. If cleanup is still pending, send `{"operation":"submit_verify","kind":"handback","commandId":"recover-1","deliveryId":"<prior delivery ID>"}`. After an interrupted process, open `zesia workspace --driver-resume <groupId>` and send the same handback request. The local driver signing state is removed after the proof is stored.

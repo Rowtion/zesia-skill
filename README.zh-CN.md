@@ -43,4 +43,10 @@ Mac 可执行文件在构建时签名。独立包保留校验和、来源版本�
 不得覆盖已有版本。
 
 浏览器权限、本机桥、各宿主真实会话分别验收；远程/SSH 工作区和未验证浏览器不提前声称支持。
+
+### BYO-Agent 工作区
+
+运行 `zesia workspace --driver packet.json`，由用户在浏览器确认材料及执行范围。每行向标准输入发送一个 JSON 请求。用 `join` 获取会话，写入时给 `exec` 带上当前 `epoch` 和 `checkpoint`。用 `consult` 提交问题及已批准的产物引用，用 `sync` 按原操作 ID 恢复结果。
+
+向 `submit_verify` 发送 `kind: "submit"`、当前 checkpoint 和 runbook。用 `kind: "status"` 加原 `submissionId` 查看核验。核验通过后，Runtime 会校验并原子保存产物，再确认云端清理。用 `zesia workspace-result <groupId>` 读取本机产物、`attestation.json` 和 `SUMMARY.md` 的路径。进程中断后，可运行 `zesia workspace --driver-resume <groupId>`，然后用 `submit_verify` 的 `kind: "handback"` 加原 `deliveryId` 恢复。
 网站脚本是能够读取页面内存的受信代码，本地草稿要求不代表密码学上的服务端不可读取保证。
