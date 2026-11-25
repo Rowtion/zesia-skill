@@ -1,4 +1,5 @@
-import { createHash, generateKeyPairSync, randomUUID, sign } from 'node:crypto';
+import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomUUID, sign } from 'node:crypto';
+import { setTimeout as pause } from 'node:timers/promises';
 import { destinationOf } from './config.mjs';
 import { attachmentPayload } from './evidence.mjs';
 import { stripAttachments, validatePacket } from './workflow.mjs';
@@ -153,6 +154,39 @@ export function createGroupWorkflow({ store, configuration, fetchRequest = fetch
       || (payload.scopeHash !== undefined && (typeof payload.scopeHash !== 'string' || !hash.test(payload.scopeHash)))) {
       throw Error('Use a supported driver operation with a stable command ID and approved scope.');
     }
+    if (operation === 'submit_verify' && payload.kind === 'handback') {
+      const saved = await store.readDriverDelivery(roomId, payload.deliveryId);
+      return finishDriver(group, saved.sealed);
+    }
+    if (operation === 'submit_verify' && !['submit', 'status'].includes(payload.kind)) {
+      throw Error('Use submit_verify to submit a runbook, check its status, or resume local handback.');
+    }
+    const result = await requestDriver(group, operation, payload);
+    if (operation === 'submit_verify' && result.state === 'passed' && result.delivery) {
+      const sealed = result.delivery;
+      validateDelivery(group, sealed);
+      await store.saveDriverDelivery(roomId, sealed, async output => {
+        const { manifest, manifestSha256 } = sealed;
+        const downloaded = await requestDriver(group, 'submit_verify', {
+          kind: 'download', commandId: 'download_' + digest([manifest.deliveryId, output.artifactId]).slice(0, 48),
+          scopeHash: manifest.scopeHash, deliveryId: manifest.deliveryId, requestId: manifest.requestId,
+          manifestSha256, artifactId: output.artifactId, objectVersion: output.objectVersion,
+        });
+        if (!downloaded.ok || digest(downloaded.artifact) !== digest(output) || typeof downloaded.base64 !== 'string') {
+          throw Error('The verified output could not be downloaded. Check the original submission status.');
+        }
+        return Buffer.from(downloaded.base64, 'base64');
+      });
+      return finishDriver(group, sealed);
+    }
+    if (operation === 'sync' && result.capabilities?.some(item => item.state === 'awaiting_approval')) {
+      return { ...result, workspaceUrl: groupUrl(group),
+        message: 'A capability call is waiting for human confirmation. After the decision, use the same call ID and parameters.' };
+    }
+    return result;
+  }
+
+  async function requestDriver(group, operation, payload) {
     let scopeHash = payload.scopeHash;
     if (!scopeHash) {
       const session = await (await send(group, 'session')).json();
@@ -175,11 +209,114 @@ export function createGroupWorkflow({ store, configuration, fetchRequest = fetch
         method: 'POST', headers: { 'content-type': 'application/json', 'x-zesia-room-signature': signature },
         body: JSON.stringify(body),
       }, { timeoutMs: 90_000, allowRoomError: true });
-      result = await response.json();
+      result = JSON.parse((await boundedBytes(response, 3 * 1024 * 1024)).toString('utf8'));
     } catch { return unknown; }
     if (!response.ok) return { ...(response.status >= 500 ? unknown : { ...unknown, outcome: 'not_started' }),
       code: typeof result?.code === 'string' && id.test(result.code) ? result.code : unknown.code, status: response.status };
     return result?.ok === true ? result : unknown;
+  }
+
+  function validateDelivery(group, sealed) {
+    const { manifest, manifestSha256, localReceiptSha256 } = sealed ?? {};
+    if (manifest?.format !== 'zesia.driver.delivery.v1' || manifest.roomId !== group.roomId
+      || manifest.requestId !== group.admission.requestId || !hash.test(manifest.scopeHash) || !id.test(manifest.deliveryId)
+      || !Array.isArray(manifest.outputs) || !manifest.outputs.length || manifest.outputs.length > 8
+      || new Set(manifest.outputs.map(item => item.path)).size !== manifest.outputs.length
+      || manifest.outputs.some(item => !id.test(item.artifactId ?? ''))
+      || new Set(manifest.outputs.map(item => item.artifactId)).size !== manifest.outputs.length
+      || !/^sha256:[a-f0-9]{64}$/u.test(manifest.proof?.image) || !Array.isArray(manifest.proof?.inputs)
+      || !Array.isArray(manifest.proof?.cmd) || !Array.isArray(manifest.proof?.assertions)
+      || !manifest.proof.assertions.length || manifest.proof.assertions.some(item => item.passed !== true)
+      || digest(manifest) !== manifestSha256) throw Error('The delivery manifest failed verification.');
+    const receipt = {
+      format: 'zesia.driver.local-receipt.v1', deliveryId: manifest.deliveryId, manifestSha256,
+      outputs: manifest.outputs.map(({ path, sha256, bytes }) => ({ path, sha256, bytes })),
+    };
+    if (digest(receipt) !== localReceiptSha256) throw Error('The local receipt digest does not match the delivery.');
+  }
+
+  async function finishDriver(group, sealed) {
+    validateDelivery(group, sealed);
+    const { manifest, manifestSha256 } = sealed;
+    const { deliveryId, requestId, scopeHash, outputs, proof } = manifest;
+    const local = await store.readDriverDelivery(group.roomId, deliveryId);
+    const localReceiptSha256 = digest({ format: 'zesia.driver.local-receipt.v1', deliveryId, manifestSha256, outputs: local.measuredOutputs });
+    if (local.sealed.manifestSha256 !== manifestSha256 || localReceiptSha256 !== sealed.localReceiptSha256) {
+      throw Error('The verified local files do not match the delivery receipt.');
+    }
+    const binding = { deliveryId, requestId, scopeHash, manifestSha256, localReceiptSha256,
+      publicKeySpki: group.admission.identity.publicKeySpki };
+    const ask = kind => requestDriver(group, 'submit_verify', { ...binding, kind, commandId: kind + '_' + digest(deliveryId).slice(0, 48) });
+    let retirement = await ask('retirement');
+    if (retirement.state === 'awaiting_ack') retirement = await ask('ack');
+    for (let check = 0; check < 8 && retirement.state === 'cleaning'; check++) {
+      await pause(250);
+      retirement = await ask('retirement');
+    }
+    if (!['purged', 'expired'].includes(retirement.state)) {
+      return { ok: true, state: 'handback_pending', deliveryId,
+        message: 'The files are saved locally. Resume handback with this delivery ID to recover cloud cleanup confirmation.' };
+    }
+    if (retirement.deliveryId !== deliveryId || retirement.requestId !== requestId || retirement.scopeHash !== scopeHash
+      || retirement.manifestSha256 !== manifestSha256 || retirement.localReceiptSha256 !== localReceiptSha256
+      || !Number.isFinite(Date.parse(retirement.cloudPurgedAt))
+      || (retirement.state === 'purged' && (!Number.isFinite(Date.parse(retirement.acknowledgedAt))
+        || Date.parse(retirement.cloudPurgedAt) < Date.parse(retirement.acknowledgedAt)))) {
+      throw Error('The cloud cleanup receipt does not match the local delivery.');
+    }
+    const cloudPurgedAt = retirement.cloudPurgedAt;
+    if (retirement.state === 'expired') {
+      await store.save({ id: group.roomId, kind: 'group', title: group.admission.goal.title, status: 'expired',
+        updatedAt: iso(now()), driverDeliveryId: deliveryId, cloudCopy: { state: 'expired', cloudPurgedAt } });
+      await store.removeDriverRecovery(group.roomId);
+      return { ok: true, state: 'expired', deliveryId, cloudPurgedAt, artifacts: local.artifacts,
+        message: 'The files are saved locally. The cloud copy expired before it received a local acknowledgment.' };
+    }
+    const attestation = {
+      _type: 'https://in-toto.io/Statement/v1',
+      subject: outputs.map(({ path, sha256 }) => ({ name: path, digest: { sha256 } })),
+      predicateType: 'https://zesia.dev/attestations/clean-room/v1',
+      predicate: { ...proof, deliveryId, scopeHash, manifestSha256, localReceiptSha256, cloudPurgedAt,
+        outputs: outputs.map(({ path, sha256, bytes }) => ({ path, sha256, bytes })) },
+    };
+    const text = 'Clean-Room replay and semantic review passed. The verified files were saved locally and the cloud copy was cleared.';
+    const summary = ['# Verified delivery', '', text, '', ...attestation.subject.map(item => '- ' + item.name
+      + ' · SHA-256 ' + item.digest.sha256), '', 'Cloud cleanup confirmed at ' + cloudPurgedAt, ''].join('\n');
+    const driverProof = await store.saveDriverProof(group.roomId, deliveryId,
+      Buffer.from(JSON.stringify(stable(attestation), null, 2) + '\n'), Buffer.from(summary));
+    await store.save({ id: group.roomId, kind: 'group', title: group.admission.goal.title, status: 'completed',
+      updatedAt: iso(now()), result: { receiptId: deliveryId, text }, driverProof, cloudCopy: { state: 'purged', cloudPurgedAt } });
+    await store.removeDriverRecovery(group.roomId);
+    return { ok: true, state: 'completed', deliveryId, cloudPurgedAt, ...driverProof };
+  }
+
+  async function resumeDriver(roomId) {
+    const recovery = await store.readDriverRecovery(roomId, now());
+    const origin = destinationOf((await configuration()).url);
+    const { requestId, identity, title, privateKey } = recovery;
+    if (recovery.origin !== origin || roomId !== 'room_' + digest(['zesia-room-v1', requestId]).slice(0, 48)) {
+      throw Error('Restore the approved destination and account.');
+    }
+    const key = createPrivateKey({ key: Buffer.from(privateKey, 'base64url'), type: 'pkcs8', format: 'der' });
+    const publicKey = createPublicKey(key).export({ type: 'spki', format: 'der' });
+    if (publicKey.toString('base64url') !== identity.publicKeySpki || sha(publicKey) !== identity.keyFingerprint) {
+      throw Error('The local driver recovery key does not match the approved room.');
+    }
+    active.set(roomId, { roomId, origin, key, status: 'active', admission: {
+      requestId, identity, workspaceMode: 'byo_agent', goal: { title },
+      destination: { key: 'zesia', url: origin + '/v1/rooms/' + roomId + '/admission' },
+    } });
+    return { groupId: roomId, status: 'active', url: groupUrl(active.get(roomId)) };
+  }
+
+  async function activateDriver(group) {
+    if (group.status === 'confirming' && group.admission.workspaceMode === 'byo_agent') {
+      await store.saveDriverRecovery(group.roomId, {
+        origin: group.origin, requestId: group.admission.requestId, title: group.admission.goal.title, identity: group.admission.identity,
+        privateKey: group.key.export({ type: 'pkcs8', format: 'der' }).toString('base64url'),
+      });
+    }
+    group.status = 'active';
   }
 
   async function decision({ id: roomId, approvalHash, approved, proof }) {
@@ -204,7 +341,7 @@ export function createGroupWorkflow({ store, configuration, fetchRequest = fetch
     });
     const admitted = await response.json();
     if (admitted.roomId !== roomId) throw Error('Unexpected cloud room identity.');
-    group.status = 'active';
+    await activateDriver(group);
     await store.save({ id: roomId, kind: 'group', title: group.admission.goal.title,
       status: 'active', updatedAt: iso(now()), url: groupUrl(group) });
     return { url: groupUrl(group) };
@@ -254,7 +391,7 @@ export function createGroupWorkflow({ store, configuration, fetchRequest = fetch
     }
     if (session.room?.roomId !== group.roomId || session.admissionBinding?.requestId !== group.admission.requestId
       || session.admissionBinding?.keyFingerprint !== group.admission.identity.keyFingerprint) throw Error('Unexpected cloud room identity.');
-    group.status = 'active';
+    await activateDriver(group);
     if (group.awaitingRetirement || group.admission.workspaceMode === 'byo_agent') return;
     if (!session.result?.receiptId || !id.test(session.result.receiptId)) return;
     const diagnosis = session.result.diagnosis;
@@ -307,7 +444,7 @@ export function createGroupWorkflow({ store, configuration, fetchRequest = fetch
   }
 
   return {
-    stage, decision, admitTrusted, driverOperation,
+    stage, decision, admitTrusted, driverOperation, resumeDriver,
     list: () => Array.from(active.values(), group => ({
       id: group.roomId, kind: group.status === 'prepared' ? 'draft' : 'group', title: group.admission.goal.title,
       status: group.status, groupDraft: group.status === 'prepared', updatedAt: group.admission.expiresAt,

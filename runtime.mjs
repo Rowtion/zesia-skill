@@ -362,6 +362,7 @@ export function createPortable({
         retentionDays,
         summary: { total: items.length, deleted, redacted, protected: protectedCount, alreadyRedacted },
         items,
+        driverRecovery: await workspace.cleanDriverRecovery({ all, apply, now: now() }),
       };
     },
     profile: () => readProfile(resolvedProfilePath),
